@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -10,20 +10,20 @@ import (
 	"net"
 	"time"
 
-	"github.com/decred/dcrd/chaincfg"
-	"github.com/decred/dcrd/peer"
+	"github.com/decred/dcrd/peer/v2"
 	"github.com/decred/dcrd/wire"
 )
 
 // mockRemotePeer creates a basic inbound peer listening on the simnet port for
-// use with Example_peerConnection.  It does not return until the listner is
+// use with Example_peerConnection.  It does not return until the listener is
 // active.
 func mockRemotePeer() error {
 	// Configure peer to act as a simnet node that offers no services.
 	peerCfg := &peer.Config{
 		UserAgentName:    "peer",  // User agent name to advertise.
 		UserAgentVersion: "1.0.0", // User agent version to advertise.
-		ChainParams:      &chaincfg.SimNetParams,
+		Net:              wire.SimNet,
+		IdleTimeout:      time.Second * 120,
 	}
 
 	// Accept connections on the simnet port.
@@ -68,7 +68,7 @@ func Example_newOutboundPeer() {
 	peerCfg := &peer.Config{
 		UserAgentName:    "peer",  // User agent name to advertise.
 		UserAgentVersion: "1.0.0", // User agent version to advertise.
-		ChainParams:      &chaincfg.SimNetParams,
+		Net:              wire.SimNet,
 		Services:         0,
 		Listeners: peer.MessageListeners{
 			OnVersion: func(p *peer.Peer, msg *wire.MsgVersion) *wire.MsgReject {
@@ -79,6 +79,7 @@ func Example_newOutboundPeer() {
 				verack <- struct{}{}
 			},
 		},
+		IdleTimeout: time.Second * 120,
 	}
 	p, err := peer.NewOutboundPeer(peerCfg, "127.0.0.1:18555")
 	if err != nil {

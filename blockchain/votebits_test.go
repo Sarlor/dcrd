@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2018 The Decred developers
+// Copyright (c) 2017-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/decred/dcrd/blockchain/stake"
-	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/blockchain/stake/v3"
+	"github.com/decred/dcrd/chaincfg/v3"
 )
 
 var (
@@ -66,7 +66,7 @@ var (
 			},
 			{
 				Id:          "Vote against",
-				Description: "Vote against all multiple ",
+				Description: "Vote against all multiple",
 				Bits:        0x20, // 0b0010 0000
 				IsAbstain:   false,
 				IsNo:        true,
@@ -99,7 +99,7 @@ var (
 // defaultParams returns net parameters modified to have a single known
 // deployment that is used throughout the various votebit tests.
 func defaultParams(vote chaincfg.Vote) chaincfg.Params {
-	params := chaincfg.RegNetParams
+	params := chaincfg.RegNetParams()
 	params.Deployments = make(map[uint32][]chaincfg.ConsensusDeployment)
 	params.Deployments[posVersion] = []chaincfg.ConsensusDeployment{{
 		Vote: vote,
@@ -109,7 +109,7 @@ func defaultParams(vote chaincfg.Vote) chaincfg.Params {
 		ExpireTime: uint64(time.Now().Add(24 * time.Hour).Unix()),
 	}}
 
-	return params
+	return *params
 }
 
 // TestNoQuorum ensures that the quorum behavior works as expected with no
@@ -141,7 +141,7 @@ func TestNoQuorum(t *testing.T) {
 	}
 
 	// get to started
-	for i := uint32(0); i < uint32(params.RuleChangeActivationInterval-1); i++ {
+	for i := uint32(0); i < params.RuleChangeActivationInterval-1; i++ {
 		// Set stake versions and vote bits.
 		node = newFakeNode(node, powVersion, posVersion, 0, curTimestamp)
 		appendFakeVotes(node, params.TicketsPerBlock, posVersion, 0x01)
@@ -164,7 +164,7 @@ func TestNoQuorum(t *testing.T) {
 
 	// get to quorum - 1
 	voteCount := uint32(0)
-	for i := uint32(0); i < uint32(params.RuleChangeActivationInterval); i++ {
+	for i := uint32(0); i < params.RuleChangeActivationInterval; i++ {
 		// Set stake versions and vote bits.
 		node = newFakeNode(node, powVersion, posVersion, 0, curTimestamp)
 		for x := 0; x < int(params.TicketsPerBlock); x++ {
@@ -195,7 +195,7 @@ func TestNoQuorum(t *testing.T) {
 
 	// get to exact quorum but with 75%%-1 yes votes
 	voteCount = uint32(0)
-	for i := uint32(0); i < uint32(params.RuleChangeActivationInterval); i++ {
+	for i := uint32(0); i < params.RuleChangeActivationInterval; i++ {
 		// Set stake versions and vote bits.
 		node = newFakeNode(node, powVersion, posVersion, 0, curTimestamp)
 		for x := 0; x < int(params.TicketsPerBlock); x++ {
@@ -232,7 +232,7 @@ func TestNoQuorum(t *testing.T) {
 
 	// get to exact quorum with exactly 75% of votes
 	voteCount = uint32(0)
-	for i := uint32(0); i < uint32(params.RuleChangeActivationInterval); i++ {
+	for i := uint32(0); i < params.RuleChangeActivationInterval; i++ {
 		// Set stake versions and vote bits.
 		node = newFakeNode(node, powVersion, posVersion, 0, curTimestamp)
 		for x := 0; x < int(params.TicketsPerBlock); x++ {
@@ -298,7 +298,7 @@ func TestYesQuorum(t *testing.T) {
 	}
 
 	// get to started
-	for i := uint32(0); i < uint32(params.RuleChangeActivationInterval-1); i++ {
+	for i := uint32(0); i < params.RuleChangeActivationInterval-1; i++ {
 		// Set stake versions and vote bits.
 		node = newFakeNode(node, powVersion, posVersion, 0, curTimestamp)
 		appendFakeVotes(node, params.TicketsPerBlock, posVersion, 0x01)
@@ -321,7 +321,7 @@ func TestYesQuorum(t *testing.T) {
 
 	// get to quorum - 1
 	voteCount := uint32(0)
-	for i := uint32(0); i < uint32(params.RuleChangeActivationInterval); i++ {
+	for i := uint32(0); i < params.RuleChangeActivationInterval; i++ {
 		// Set stake versions and vote bits.
 		node = newFakeNode(node, powVersion, posVersion, 0, curTimestamp)
 		for x := 0; x < int(params.TicketsPerBlock); x++ {
@@ -352,7 +352,7 @@ func TestYesQuorum(t *testing.T) {
 
 	// get to exact quorum but with 75%-1 yes votes
 	voteCount = uint32(0)
-	for i := uint32(0); i < uint32(params.RuleChangeActivationInterval); i++ {
+	for i := uint32(0); i < params.RuleChangeActivationInterval; i++ {
 		// Set stake versions and vote bits.
 		node = newFakeNode(node, powVersion, posVersion, 0, curTimestamp)
 		for x := 0; x < int(params.TicketsPerBlock); x++ {
@@ -389,7 +389,7 @@ func TestYesQuorum(t *testing.T) {
 
 	// get to exact quorum with exactly 75% of votes
 	voteCount = uint32(0)
-	for i := uint32(0); i < uint32(params.RuleChangeActivationInterval); i++ {
+	for i := uint32(0); i < params.RuleChangeActivationInterval; i++ {
 		// Set stake versions and vote bits.
 		node = newFakeNode(node, powVersion, posVersion, 0, curTimestamp)
 		for x := 0; x < int(params.TicketsPerBlock); x++ {
@@ -1072,7 +1072,7 @@ func TestVoting(t *testing.T) {
 					Version: posVersion,
 					Bits:    0x03,
 				},
-				count: uint32(rci) - 1,
+				count: rci - 1,
 			}, {
 				vote: stake.VoteVersionTuple{
 					Version: posVersion,
@@ -1084,7 +1084,7 @@ func TestVoting(t *testing.T) {
 					Version: posVersion,
 					Bits:    0x01,
 				},
-				count: uint32(rci),
+				count: rci,
 			}},
 			expectedState: []ThresholdStateTuple{{
 				State:  ThresholdDefined,
@@ -1501,7 +1501,7 @@ func TestVoting(t *testing.T) {
 // defaultParallelParams returns net parameters modified to have two known
 // deployments that are used throughout the parallel votebit tests.
 func defaultParallelParams() chaincfg.Params {
-	params := chaincfg.RegNetParams
+	params := chaincfg.RegNetParams()
 	params.Deployments = make(map[uint32][]chaincfg.ConsensusDeployment)
 	params.Deployments[posVersion] = []chaincfg.ConsensusDeployment{
 		{
@@ -1518,7 +1518,7 @@ func defaultParallelParams() chaincfg.Params {
 		},
 	}
 
-	return params
+	return *params
 }
 
 // TestParallelVoting ensures that two agendas running at the same time progress

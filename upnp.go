@@ -34,8 +34,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -65,12 +67,13 @@ type upnpNAT struct {
 
 // Discover searches the local network for a UPnP router returning a NAT
 // for the network if so, nil if not.
-func Discover() (nat NAT, err error) {
+func Discover(ctx context.Context) (nat NAT, err error) {
 	ssdp, err := net.ResolveUDPAddr("udp4", "239.255.255.250:1900")
 	if err != nil {
 		return
 	}
-	conn, err := net.ListenPacket("udp4", ":0")
+	var l net.ListenConfig
+	conn, err := l.ListenPacket(ctx, "udp4", ":0")
 	if err != nil {
 		return
 	}
@@ -108,7 +111,7 @@ func Discover() (nat NAT, err error) {
 			continue
 		}
 		// HTTP header field names are case-insensitive.
-		// http://www.w3.org/Protocols/rfc2616/rfc2616-sec4.html#sec4.2
+		// https://www.w3.org/Protocols/rfc2616/rfc2616-sec4.html#sec4.2
 		locString := "\r\nlocation: "
 		locIndex := strings.Index(strings.ToLower(answer), locString)
 		if locIndex < 0 {
@@ -229,7 +232,7 @@ func getServiceURL(rootURL string) (url string, err error) {
 	}
 	defer r.Body.Close()
 	if r.StatusCode >= 400 {
-		err = errors.New(string(r.StatusCode))
+		err = fmt.Errorf("%d", r.StatusCode)
 		return
 	}
 	var root root
@@ -375,7 +378,7 @@ func (n *upnpNAT) AddPortMapping(protocol string, externalPort, internalPort int
 	}
 
 	// TODO: check response to see if the port was forwarded
-	// If the port was not wildcard we don't get an reply with the port in
+	// If the port was not wildcard we don't get a reply with the port in
 	// it. Not sure about wildcard yet. miniupnpc just checks for error
 	// codes here.
 	mappedExternalPort = externalPort

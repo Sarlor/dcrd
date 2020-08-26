@@ -1,5 +1,5 @@
 // Copyright (c) 2014-2016 The btcsuite developers
-// Copyright (c) 2015-2018 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,7 +7,6 @@ package chaincfg
 
 import (
 	"encoding/hex"
-	"errors"
 	"math/big"
 	"time"
 
@@ -15,51 +14,9 @@ import (
 	"github.com/decred/dcrd/wire"
 )
 
-// These variables are the chain proof-of-work limit parameters for each default
-// network.
-var (
-	// bigOne is 1 represented as a big.Int.  It is defined here to avoid
-	// the overhead of creating it multiple times.
-	bigOne = big.NewInt(1)
-
-	// mainPowLimit is the highest proof of work value a Decred block can
-	// have for the main network.  It is the value 2^224 - 1.
-	mainPowLimit = new(big.Int).Sub(new(big.Int).Lsh(bigOne, 224), bigOne)
-
-	// testNetPowLimit is the highest proof of work value a Decred block
-	// can have for the test network.  It is the value 2^232 - 1.
-	testNetPowLimit = new(big.Int).Sub(new(big.Int).Lsh(bigOne, 232), bigOne)
-
-	// simNetPowLimit is the highest proof of work value a Decred block
-	// can have for the simulation test network.  It is the value 2^255 - 1.
-	simNetPowLimit = new(big.Int).Sub(new(big.Int).Lsh(bigOne, 255), bigOne)
-
-	// regNetPowLimit is the highest proof of work value a Decred block
-	// can have for the regression test network.  It is the value 2^255 - 1.
-	regNetPowLimit = new(big.Int).Sub(new(big.Int).Lsh(bigOne, 255), bigOne)
-)
-
-// SigHashOptimization is an optimization for verification of transactions that
-// do CHECKSIG operations with hashType SIGHASH_ALL. Although there should be no
-// consequences to daemons that are simply running a node, it may be the case
-// that you could cause database corruption if you turn this code on, create and
-// manipulate your own MsgTx, then include them in blocks. For safety, if you're
-// using the daemon with wallet or mining with the daemon this should be disabled.
-// If you believe that any MsgTxs in your daemon will be used mutably, do NOT
-// turn on this feature. It is disabled by default.
-// This feature is considered EXPERIMENTAL, enable at your own risk!
-var SigHashOptimization = false
-
-// CheckForDuplicateHashes checks for duplicate hashes when validating blocks.
-// Because of the rule inserting the height into the second (nonce) txOut, there
-// should never be a duplicate transaction hash that overwrites another. However,
-// because there is a 2^128 chance of a collision, the paranoid user may wish to
-// turn this feature on.
-var CheckForDuplicateHashes = false
-
-// CPUMinerThreads is the default number of threads to utilize with the
-// CPUMiner when mining.
-var CPUMinerThreads = 1
+// bigOne is 1 represented as a big.Int.  It is defined here to avoid the
+// overhead of creating it multiple times.
+var bigOne = big.NewInt(1)
 
 // Checkpoint identifies a known good point in the block chain.  Using
 // checkpoints allows a few optimizations for old blocks during initial download
@@ -138,7 +95,7 @@ type Choice struct {
 	// (abstain) and exist only once in the Vote.Choices array.
 	IsAbstain bool
 
-	// This coince indicates a hard No Vote.  By convention this must exist
+	// This choice indicates a hard No Vote.  By convention this must exist
 	// only once in the Vote.Choices array.
 	IsNo bool
 }
@@ -157,7 +114,7 @@ func (v *Vote) VoteIndex(vote uint16) int {
 }
 
 const (
-	// VoteIDMaxBlockSize is the vote ID for the the maximum block size
+	// VoteIDMaxBlockSize is the vote ID for the maximum block size
 	// increase agenda used for the hard fork demo.
 	VoteIDMaxBlockSize = "maxblocksize"
 
@@ -173,6 +130,16 @@ const (
 	// features useful for the Lightning Network (among other uses) defined
 	// by DCP0002 and DCP0003.
 	VoteIDLNFeatures = "lnfeatures"
+
+	// VoteIDFixLNSeqLocks is the vote ID for the agenda that corrects the
+	// sequence lock functionality needed for Lightning Network (among other
+	// uses) defined by DCP0004.
+	VoteIDFixLNSeqLocks = "fixlnseqlocks"
+
+	// VoteIDHeaderCommitments is the vote ID for the agenda that repurposes
+	// the stake root header field to support header commitments and provides
+	// an initial commitment to version 2 GCS filters defined by DCP0005.
+	VoteIDHeaderCommitments = "headercommitments"
 )
 
 // ConsensusDeployment defines details related to a specific consensus rule
@@ -192,14 +159,17 @@ type ConsensusDeployment struct {
 	ExpireTime uint64
 }
 
-// TokenPayout is a payout for block 1 which specifies an address and an amount
-// to pay to that address in a transaction output.
+// TokenPayout is a payout for block 1 which specifies a required script
+// version, script, and amount to pay in a transaction output.
 type TokenPayout struct {
-	Address string
-	Amount  int64
+	ScriptVersion uint16
+	Script        []byte
+	Amount        int64
 }
 
 // DNSSeed identifies a DNS seed.
+//
+// Deprecated: This will be removed in the next major version bump.
 type DNSSeed struct {
 	// Host defines the hostname of the seed.
 	Host string
@@ -207,6 +177,11 @@ type DNSSeed struct {
 	// HasFiltering defines whether the seed supports filtering
 	// by service flags (wire.ServiceFlag).
 	HasFiltering bool
+}
+
+// String returns the hostname of the DNS seed in human-readable form.
+func (d DNSSeed) String() string {
+	return d.Host
 }
 
 // Params defines a Decred network by its parameters.  These parameters may be
@@ -224,13 +199,15 @@ type Params struct {
 
 	// DNSSeeds defines a list of DNS seeds for the network that are used
 	// as one method to discover peers.
+	//
+	// Deprecated: This will be removed in the next major version bump.
 	DNSSeeds []DNSSeed
 
 	// GenesisBlock defines the first block of the chain.
 	GenesisBlock *wire.MsgBlock
 
 	// GenesisHash is the starting block hash.
-	GenesisHash *chainhash.Hash
+	GenesisHash chainhash.Hash
 
 	// PowLimit defines the highest allowed proof of work value for a block
 	// as a uint256.
@@ -302,7 +279,9 @@ type Params struct {
 	// 1     subsidy *= MulSubsidy
 	// 2     subsidy /= DivSubsidy
 	//
-	// Caveat: Don't overflow the int64 register!!
+	// NOTE: BaseSubsidy must be a max of 140,739,635,871,744 atoms or incorrect
+	// results will occur due to int64 overflow.  This value comes from
+	// MaxInt64/MaxUint16 = (2^63 - 1)/(2^16 - 1) = 2^47 + 2^31 + 2^15.
 
 	// BaseSubsidy is the starting subsidy amount for mined blocks.
 	BaseSubsidy int64
@@ -332,6 +311,11 @@ type Params struct {
 
 	// Checkpoints ordered from oldest to newest.
 	Checkpoints []Checkpoint
+
+	// MinKnownChainWork is the minimum amount of known total work for the chain
+	// at a given point in time.  This is intended to be updated periodically
+	// with new releases.  It may be nil for networks that do not require it.
+	MinKnownChainWork *big.Int
 
 	// These fields are related to voting on consensus rule changes as
 	// defined by BIP0009.
@@ -381,7 +365,7 @@ type Params struct {
 
 	// SLIP-0044 registered coin type used for BIP44, used in the hierarchical
 	// deterministic path for address generation.
-	// All SLIP-0044 registered coin types are are defined here:
+	// All SLIP-0044 registered coin types are defined here:
 	// https://github.com/satoshilabs/slips/blob/master/slip-0044.md
 	SLIP0044CoinType uint32
 
@@ -473,124 +457,139 @@ type Params struct {
 	// BlockOneLedger specifies the list of payouts in the coinbase of
 	// block height 1. If there are no payouts to be given, set this
 	// to an empty slice.
-	BlockOneLedger []*TokenPayout
+	BlockOneLedger []TokenPayout
+
+	// seeders defines a list of seeders for the network that are used
+	// as one method to discover peers.
+	seeders []string
 }
 
-var (
-	// ErrDuplicateNet describes an error where the parameters for a Decred
-	// network could not be set due to the network already being a standard
-	// network or previously-registered into this package.
-	ErrDuplicateNet = errors.New("duplicate Decred network")
-
-	// ErrUnknownHDKeyID describes an error where the provided id which
-	// is intended to identify the network for a hierarchical deterministic
-	// private extended key is not registered.
-	ErrUnknownHDKeyID = errors.New("unknown hd private extended key bytes")
-)
-
-var (
-	registeredNets    = make(map[wire.CurrencyNet]struct{})
-	pubKeyAddrIDs     = make(map[[2]byte]struct{})
-	pubKeyHashAddrIDs = make(map[[2]byte]struct{})
-	pkhEdwardsAddrIDs = make(map[[2]byte]struct{})
-	pkhSchnorrAddrIDs = make(map[[2]byte]struct{})
-	scriptHashAddrIDs = make(map[[2]byte]struct{})
-	hdPrivToPubKeyIDs = make(map[[4]byte][]byte)
-)
-
-// String returns the hostname of the DNS seed in human-readable form.
-func (d DNSSeed) String() string {
-	return d.Host
+// HDPrivKeyVersion returns the hierarchical deterministic extended private key
+// magic version bytes for the network the parameters define.
+func (p *Params) HDPrivKeyVersion() [4]byte {
+	return p.HDPrivateKeyID
 }
 
-// Register registers the network parameters for a Decred network.  This may
-// error with ErrDuplicateNet if the network is already registered (either
-// due to a previous Register call, or the network being one of the default
-// networks).
+// HDPubKeyVersion returns the hierarchical deterministic extended public key
+// magic version bytes for the network the parameters define.
+func (p *Params) HDPubKeyVersion() [4]byte {
+	return p.HDPublicKeyID
+}
+
+// AddrIDPubKeyV0 returns the magic prefix bytes for version 0 pay-to-pubkey
+// addresses.
+func (p *Params) AddrIDPubKeyV0() [2]byte {
+	return p.PubKeyAddrID
+}
+
+// AddrIDPubKeyHashECDSAV0 returns the magic prefix bytes for version 0
+// pay-to-pubkey-hash addresses where the underlying pubkey is secp256k1 and the
+// signature algorithm is ECDSA.
+func (p *Params) AddrIDPubKeyHashECDSAV0() [2]byte {
+	return p.PubKeyHashAddrID
+}
+
+// AddrIDPubKeyHashEd25519V0 returns the magic prefix bytes for version 0
+// pay-to-pubkey-hash addresses where the underlying pubkey and signature
+// algorithm are Ed25519.
+func (p *Params) AddrIDPubKeyHashEd25519V0() [2]byte {
+	return p.PKHEdwardsAddrID
+}
+
+// AddrIDPubKeyHashSchnorrV0 returns the magic prefix bytes for version 0
+// pay-to-pubkey-hash addresses where the underlying pubkey is secp256k1 and the
+// signature algorithm is Schnorr.
+func (p *Params) AddrIDPubKeyHashSchnorrV0() [2]byte {
+	return p.PKHSchnorrAddrID
+}
+
+// AddrIDScriptHashV0 returns the magic prefix bytes for version 0
+// pay-to-script-hash addresses.
+func (p *Params) AddrIDScriptHashV0() [2]byte {
+	return p.ScriptHashAddrID
+}
+
+// BaseSubsidyValue returns the starting base max potential subsidy amount for
+// mined blocks.  This value is reduced over time and then split proportionally
+// between PoW, PoS, and the Treasury.  The reduction is controlled by the
+// SubsidyReductionInterval, SubsidyReductionMultiplier, and
+// SubsidyReductionDivisor parameters.
+func (p *Params) BaseSubsidyValue() int64 {
+	return p.BaseSubsidy
+}
+
+// SubsidyReductionMultiplier returns the multiplier to use when performing
+// the exponential subsidy reduction.
+func (p *Params) SubsidyReductionMultiplier() int64 {
+	return p.MulSubsidy
+}
+
+// SubsidyReductionDivisor returns the divisor to use when performing the
+// exponential subsidy reduction.
+func (p *Params) SubsidyReductionDivisor() int64 {
+	return p.DivSubsidy
+}
+
+// SubsidyReductionIntervalBlocks returns the reduction interval in number of
+// blocks.
+func (p *Params) SubsidyReductionIntervalBlocks() int64 {
+	return p.SubsidyReductionInterval
+}
+
+// WorkSubsidyProportion returns the comparative proportion of the subsidy
+// generated for creating a block (PoW).
 //
-// Network parameters should be registered into this package by a main package
-// as early as possible.  Then, library packages may lookup networks or network
-// parameters based on inputs and work regardless of the network being standard
-// or not.
-func Register(params *Params) error {
-	if _, ok := registeredNets[params.Net]; ok {
-		return ErrDuplicateNet
-	}
-	registeredNets[params.Net] = struct{}{}
-	pubKeyAddrIDs[params.PubKeyAddrID] = struct{}{}
-	pubKeyHashAddrIDs[params.PubKeyHashAddrID] = struct{}{}
-	scriptHashAddrIDs[params.ScriptHashAddrID] = struct{}{}
-	hdPrivToPubKeyIDs[params.HDPrivateKeyID] = params.HDPublicKeyID[:]
-	return nil
+// The proportional split between PoW, PoS, and the Treasury is calculated
+// by treating each of the proportional parameters as a ratio to the sum of
+// the three proportional parameters: WorkSubsidyProportion,
+// StakeSubsidyProportion, and TreasurySubsidyProportion.
+//
+// For example:
+// WorkSubsidyProportion:     6 => 6 / (6+3+1) => 6/10 => 60%
+// StakeSubsidyProportion:    3 => 3 / (6+3+1) => 3/10 => 30%
+// TreasurySubsidyProportion: 1 => 1 / (6+3+1) => 1/10 => 10%
+func (p *Params) WorkSubsidyProportion() uint16 {
+	return p.WorkRewardProportion
 }
 
-// mustRegister performs the same function as Register except it panics if there
-// is an error.  This should only be called from package init functions.
-func mustRegister(params *Params) {
-	if err := Register(params); err != nil {
-		panic("failed to register network: " + err.Error())
-	}
+// StakeSubsidyProportion returns the comparative proportion of the subsidy
+// generated for casting stake votes (collectively, per block).  See the
+// documentation for WorkSubsidyProportion for more details on how the
+// parameter is used.
+func (p *Params) StakeSubsidyProportion() uint16 {
+	return p.StakeRewardProportion
 }
 
-// IsPubKeyAddrID returns whether the id is an identifier known to prefix a
-// pay-to-pubkey address on any default or registered network.
-func IsPubKeyAddrID(id [2]byte) bool {
-	_, ok := pubKeyHashAddrIDs[id]
-	return ok
+// TreasurySubsidyProportion returns the comparative proportion of the
+// subsidy allocated to the project treasury.  See the documentation for
+// WorkSubsidyProportion for more details on how the parameter is used.
+func (p *Params) TreasurySubsidyProportion() uint16 {
+	return p.BlockTaxProportion
 }
 
-// IsPubKeyHashAddrID returns whether the id is an identifier known to prefix a
-// pay-to-pubkey-hash address on any default or registered network.  This is
-// used when decoding an address string into a specific address type.  It is up
-// to the caller to check both this and IsScriptHashAddrID and decide whether an
-// address is a pubkey hash address, script hash address, neither, or
-// undeterminable (if both return true).
-func IsPubKeyHashAddrID(id [2]byte) bool {
-	_, ok := pubKeyHashAddrIDs[id]
-	return ok
+// VotesPerBlock returns the maximum number of votes a block must contain to
+// receive full subsidy.
+func (p *Params) VotesPerBlock() uint16 {
+	return p.TicketsPerBlock
 }
 
-// IsPKHEdwardsAddrID returns whether the id is an identifier know to prefix a
-// pay-to-pubkey-hash Edwards address.
-func IsPKHEdwardsAddrID(id [2]byte) bool {
-	_, ok := pkhEdwardsAddrIDs[id]
-	return ok
+// StakeValidationBeginHeight returns the height at which votes become required
+// to extend a block.  This height is the first that will be voted on, but will
+// not include any votes itself.
+func (p *Params) StakeValidationBeginHeight() int64 {
+	return p.StakeValidationHeight
 }
 
-// IsPKHSchnorrAddrID returns whether the id is an identifier know to prefix a
-// pay-to-pubkey-hash secp256k1 Schnorr address.
-func IsPKHSchnorrAddrID(id [2]byte) bool {
-	_, ok := pkhSchnorrAddrIDs[id]
-	return ok
+// StakeEnableHeight returns the height at which the first ticket could possibly
+// mature.
+func (p *Params) StakeEnableHeight() int64 {
+	return p.StakeEnabledHeight
 }
 
-// IsScriptHashAddrID returns whether the id is an identifier known to prefix a
-// pay-to-script-hash address on any default or registered network.  This is
-// used when decoding an address string into a specific address type.  It is up
-// to the caller to check both this and IsPubKeyHashAddrID and decide whether an
-// address is a pubkey hash address, script hash address, neither, or
-// undeterminable (if both return true).
-func IsScriptHashAddrID(id [2]byte) bool {
-	_, ok := scriptHashAddrIDs[id]
-	return ok
-}
-
-// HDPrivateKeyToPublicKeyID accepts a private hierarchical deterministic
-// extended key id and returns the associated public key id.  When the provided
-// id is not registered, the ErrUnknownHDKeyID error will be returned.
-func HDPrivateKeyToPublicKeyID(id []byte) ([]byte, error) {
-	if len(id) != 4 {
-		return nil, ErrUnknownHDKeyID
-	}
-
-	var key [4]byte
-	copy(key[:], id)
-	pubBytes, ok := hdPrivToPubKeyIDs[key]
-	if !ok {
-		return nil, ErrUnknownHDKeyID
-	}
-
-	return pubBytes, nil
+// TicketExpiryBlocks returns the number of blocks after maturity that tickets
+// expire. This will be >= (StakeEnableHeight() + StakeValidationBeginHeight()).
+func (p *Params) TicketExpiryBlocks() uint32 {
+	return p.TicketExpiry
 }
 
 // newHashFromStr converts the passed big-endian hex string into a
@@ -612,12 +611,28 @@ func newHashFromStr(hexStr string) *chainhash.Hash {
 	return hash
 }
 
+// hexDecode decodes the passed hex string and returns the resulting bytes.  It
+// panics if an error occurs. This is only provided for the hard-coded constants
+// so errors in the source code can be detected. It will only (and must only) be
+// called with hard-coded values.
 func hexDecode(hexStr string) []byte {
 	b, err := hex.DecodeString(hexStr)
 	if err != nil {
 		panic(err)
 	}
 	return b
+}
+
+// hexToBigInt converts the passed hex string into a big integer and will panic
+// if there is an error.  This is only provided for the hard-coded constants so
+// errors in the source code can be detected. It will only (and must only) be
+// called with hard-coded values.
+func hexToBigInt(hexStr string) *big.Int {
+	val, ok := new(big.Int).SetString(hexStr, 16)
+	if !ok {
+		panic("failed to parse big integer from hex: " + hexStr)
+	}
+	return val
 }
 
 // BlockOneSubsidy returns the total subsidy of block height 1 for the
@@ -650,10 +665,7 @@ func (p *Params) LatestCheckpointHeight() int64 {
 	return p.Checkpoints[len(p.Checkpoints)-1].Height
 }
 
-func init() {
-	// Register all default networks when the package is initialized.
-	mustRegister(&MainNetParams)
-	mustRegister(&TestNet3Params)
-	mustRegister(&SimNetParams)
-	mustRegister(&RegNetParams)
+// Seeders returns the list of HTTP seeders.
+func (p *Params) Seeders() []string {
+	return p.seeders
 }

@@ -1,9 +1,9 @@
 blockchain
 ==========
 
-[![Build Status](http://img.shields.io/travis/decred/dcrd.svg)](https://travis-ci.org/decred/dcrd)
-[![ISC License](http://img.shields.io/badge/license-ISC-blue.svg)](http://copyfree.org)
-[![GoDoc](https://img.shields.io/badge/godoc-reference-blue.svg)](http://godoc.org/github.com/decred/dcrd/blockchain)
+[![Build Status](https://github.com/decred/dcrd/workflows/Build%20and%20Test/badge.svg)](https://github.com/decred/dcrd/actions)
+[![ISC License](https://img.shields.io/badge/license-ISC-blue.svg)](http://copyfree.org)
+[![Doc](https://img.shields.io/badge/doc-reference-blue.svg)](https://pkg.go.dev/github.com/decred/dcrd/blockchain/v3)
 
 Package blockchain implements Decred block handling and chain selection rules.
 The test coverage is currently only around 60%, but will be increasing over
@@ -37,10 +37,6 @@ is by no means exhaustive:
    transaction amounts, script complexity, and merkle root calculations
  - Compare the block against predetermined checkpoints for expected timestamps
    and difficulty based on elapsed time since the checkpoint
- - Save the most recent orphan blocks for a limited time in case their parent
-   blocks become available
- - Stop processing if the block is an orphan as the rest of the processing
-   depends on the block's position within the block chain
  - Perform a series of more thorough checks that depend on the block's position
    within the block chain such as verifying block difficulties adhere to
    difficulty retarget rules, timestamps are after the median of the last
@@ -61,23 +57,13 @@ is by no means exhaustive:
 
 ## Examples
 
-* [ProcessBlock Example](http://godoc.org/github.com/decred/dcrd/blockchain#example-BlockChain-ProcessBlock)  
+* [ProcessBlock Example](https://pkg.go.dev/github.com/decred/dcrd/blockchain/v3#example-BlockChain.ProcessBlock)
   Demonstrates how to create a new chain instance and use ProcessBlock to
   attempt to add a block to the chain.  This example intentionally
   attempts to insert a duplicate genesis block to illustrate how an invalid
   block is handled.
 
-* [CompactToBig Example](http://godoc.org/github.com/decred/dcrd/blockchain#example-CompactToBig)  
-  Demonstrates how to convert the compact "bits" in a block header which
-  represent the target difficulty to a big integer and display it using the
-  typical hex notation.
-
-* [BigToCompact Example](http://godoc.org/github.com/decred/dcrd/blockchain#example-BigToCompact)  
-  Demonstrates how to convert how to convert a target difficulty into the
-  compact "bits" in a block header which represent that target difficulty.
-
 ## License
-
 
 Package blockchain is licensed under the [copyfree](http://copyfree.org) ISC
 License.

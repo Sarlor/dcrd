@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,7 +8,7 @@ package schnorr
 import (
 	"fmt"
 
-	"github.com/decred/dcrd/dcrec/secp256k1"
+	"github.com/decred/dcrd/dcrec/secp256k1/v3"
 )
 
 // These constants define the lengths of serialized public keys.
@@ -24,8 +24,7 @@ const (
 // ParsePubKey parses a public key for a koblitz curve from a bytestring into a
 // ecdsa.Publickey, verifying that it is valid. It supports compressed signature
 // formats only.
-func ParsePubKey(curve *secp256k1.KoblitzCurve,
-	pubKeyStr []byte) (key *secp256k1.PublicKey, err error) {
+func ParsePubKey(pubKeyStr []byte) (key *secp256k1.PublicKey, err error) {
 	if pubKeyStr == nil {
 		err = fmt.Errorf("nil pubkey byte string")
 		return

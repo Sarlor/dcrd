@@ -1,4 +1,4 @@
-// Copyright (c) 2017 The Decred developers
+// Copyright (c) 2017-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,15 +7,15 @@ package chaingen_test
 import (
 	"fmt"
 
-	"github.com/decred/dcrd/blockchain/chaingen"
-	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/blockchain/v3/chaingen"
+	"github.com/decred/dcrd/chaincfg/v3"
 )
 
 // This example demonstrates creating a new generator instance and using it to
-// generate the required premine block and enough blocks to have mature coinbase
+// generate the required first block and enough blocks to have mature coinbase
 // outputs to work with along with asserting the generator state along the way.
 func Example_basicUsage() {
-	params := &chaincfg.RegNetParams
+	params := chaincfg.RegNetParams()
 	g, err := chaingen.MakeGenerator(params)
 	if err != nil {
 		fmt.Println(err)
@@ -26,13 +26,13 @@ func Example_basicUsage() {
 	coinbaseMaturity := params.CoinbaseMaturity
 
 	// ---------------------------------------------------------------------
-	// Premine.
+	// First block.
 	// ---------------------------------------------------------------------
 
-	// Add the required premine block.
+	// Add the required first block.
 	//
-	//   genesis -> bp
-	g.CreatePremineBlock("bp", 0)
+	//   genesis -> bfb
+	g.CreateBlockOne("bfb", 0)
 	g.AssertTipHeight(1)
 	fmt.Println(g.TipName())
 
@@ -51,7 +51,7 @@ func Example_basicUsage() {
 	g.AssertTipHeight(uint32(coinbaseMaturity) + 1)
 
 	// Output:
-	// bp
+	// bfb
 	// bm0
 	// bm1
 	// bm2

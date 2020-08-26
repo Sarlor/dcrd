@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2018 The Decred developers
+// Copyright (c) 2016-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -14,10 +14,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/dcrutil"
-	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/dcrutil/v3"
+	"github.com/decred/dcrd/txscript/v3"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -603,13 +603,13 @@ func voteBlockScript(parentBlock *wire.MsgBlock) []byte {
 // depending on the provided params.
 func voteBitsScript(bits uint16, voteVersion uint32) []byte {
 	data := make([]byte, 6)
-	binary.LittleEndian.PutUint16(data[:], bits)
+	binary.LittleEndian.PutUint16(data, bits)
 	binary.LittleEndian.PutUint32(data[2:], voteVersion)
 	if voteVersion == 0 {
 		data = data[:2]
 	}
 	script, err := txscript.NewScriptBuilder().AddOp(txscript.OP_RETURN).
-		AddData(data[:]).Script()
+		AddData(data).Script()
 	if err != nil {
 		panic(err)
 	}
@@ -967,7 +967,7 @@ func (g *Generator) CalcNextReqStakeDifficulty(prevBlock *wire.MsgBlock) int64 {
 		// built tests won't be using large enough values to overflow,
 		// so just use uint64s.
 		adjusted := (skewedPoolSize << 32) / targetPoolSize
-		adjusted = adjusted << uint64((numWindows-i)*weightAlpha)
+		adjusted <<= uint64((numWindows - i) * weightAlpha)
 		weightedPoolSizeSum += uint64(adjusted)
 		weightSum += 1 << uint64((numWindows-i)*weightAlpha)
 	}
@@ -1023,7 +1023,7 @@ func (g *Generator) CalcNextReqStakeDifficulty(prevBlock *wire.MsgBlock) int64 {
 		// built tests won't be using large enough values to overflow,
 		// so just use uint64s.
 		adjusted := (windowNewTickets << 32) / targetTicketsPerWindow
-		adjusted = adjusted << uint64((numWindows-i)*weightAlpha)
+		adjusted <<= uint64((numWindows - i) * weightAlpha)
 		weightedTicketsSum += uint64(adjusted)
 	}
 
@@ -1089,7 +1089,7 @@ func (g *Generator) CalcNextRequiredStakeDifficulty() int64 {
 	return g.CalcNextReqStakeDifficulty(g.tip)
 }
 
-// hash256prng is a determinstic pseudorandom number generator that uses a
+// hash256prng is a deterministic pseudorandom number generator that uses a
 // 256-bit secure hashing function to generate random uint32s starting from
 // an initial seed.
 type hash256prng struct {
@@ -1152,7 +1152,7 @@ func (hp *hash256prng) Hash256Rand() uint32 {
 	}
 
 	// Roll over the entire PRNG by re-hashing the seed when the hash
-	// iterator index overlows a uint32.
+	// iterator index overflows a uint32.
 	if hp.idx > math.MaxUint32 {
 		hp.seed = chainhash.HashH(hp.seed[:])
 		hp.cachedHash = hp.seed
@@ -1195,13 +1195,13 @@ func winningTickets(voteBlock *wire.MsgBlock, liveTickets []*stakeTicket, numVot
 	}
 
 	// Ensure the number of live tickets is within the allowable range.
-	numLiveTickets := uint32(len(liveTickets))
+	numLiveTickets := len(liveTickets)
 	if numLiveTickets > math.MaxUint32 {
 		return nil, chainhash.Hash{}, fmt.Errorf("live ticket pool "+
 			"has %d tickets which is more than the max allowed of "+
 			"%d", len(liveTickets), uint32(math.MaxUint32))
 	}
-	if uint32(numVotes) > numLiveTickets {
+	if uint32(numVotes) > uint32(numLiveTickets) {
 		return nil, chainhash.Hash{}, fmt.Errorf("live ticket pool "+
 			"has %d tickets, while %d are needed to vote",
 			len(liveTickets), numVotes)
@@ -1214,7 +1214,7 @@ func winningTickets(voteBlock *wire.MsgBlock, liveTickets []*stakeTicket, numVot
 	winners := make([]*stakeTicket, 0, numVotes)
 	usedOffsets := make(map[uint32]struct{})
 	for uint16(len(winners)) < numVotes {
-		ticketIndex := prng.uniformRandom(numLiveTickets)
+		ticketIndex := prng.uniformRandom(uint32(numLiveTickets))
 		if _, exists := usedOffsets[ticketIndex]; !exists {
 			usedOffsets[ticketIndex] = struct{}{}
 			winners = append(winners, liveTickets[ticketIndex])
@@ -1334,7 +1334,7 @@ func buildMerkleTreeStore(transactions []*dcrutil.Tx) []*chainhash.Hash {
 			merkles[offset] = newHash
 
 		// The normal case sets the parent node to the hash of the
-		// concatentation of the left and right children.
+		// concatenation of the left and right children.
 		default:
 			newHash := hashMerkleBranches(merkles[i], merkles[i+1])
 			merkles[offset] = newHash
@@ -1568,7 +1568,7 @@ func (g *Generator) ReplaceVoteBitsN(voteNum int, voteBits uint16) func(*wire.Ms
 		stx := b.STransactions[voteNum]
 		if !isVoteTx(stx) {
 			panic(fmt.Sprintf("attempt to replace non-vote "+
-				"transaction #%d for for block %s", voteNum,
+				"transaction #%d for block %s", voteNum,
 				b.BlockHash()))
 		}
 
@@ -2274,7 +2274,7 @@ func (g *Generator) NextBlock(blockName string, spend *SpendableOut, ticketSpend
 	// Update generator state and return the block.
 	blockHash := block.BlockHash()
 	if block.Header.PrevBlock != prevHash {
-		// Save the orignal block this one was built from if it was
+		// Save the original block this one was built from if it was
 		// manually changed in a munger so the code which deals with
 		// updating the live tickets when changing the tip has access to
 		// it.
@@ -2292,11 +2292,11 @@ func (g *Generator) NextBlock(blockName string, spend *SpendableOut, ticketSpend
 	return &block
 }
 
-// CreatePremineBlock generates the first block of the chain with the required
-// premine payouts.  The additional amount parameter can be used to create a
-// block that is otherwise a completely valid premine block except it adds the
-// extra amount to each payout and thus create a block that violates consensus.
-func (g *Generator) CreatePremineBlock(blockName string, additionalAmount dcrutil.Amount, mungers ...func(*wire.MsgBlock)) *wire.MsgBlock {
+// CreateBlockOne generates the first block of the chain with the required
+// payouts.  The additional amount parameter can be used to create a block that
+// is otherwise a completely valid block one except it adds the extra amount to
+// each payout and thus create a block that violates consensus.
+func (g *Generator) CreateBlockOne(blockName string, additionalAmount dcrutil.Amount, mungers ...func(*wire.MsgBlock)) *wire.MsgBlock {
 	coinbaseTx := wire.NewMsgTx()
 	coinbaseTx.AddTxIn(&wire.TxIn{
 		PreviousOutPoint: *wire.NewOutPoint(&chainhash.Hash{},
@@ -2312,18 +2312,10 @@ func (g *Generator) CreatePremineBlock(blockName string, additionalAmount dcruti
 	// in order to set the input value appropriately.
 	var totalSubsidy dcrutil.Amount
 	for _, payout := range g.params.BlockOneLedger {
-		payoutAddr, err := dcrutil.DecodeAddress(payout.Address)
-		if err != nil {
-			panic(err)
-		}
-		pkScript, err := txscript.PayToAddrScript(payoutAddr)
-		if err != nil {
-			panic(err)
-		}
 		coinbaseTx.AddTxOut(&wire.TxOut{
 			Value:    payout.Amount + int64(additionalAmount),
-			Version:  0,
-			PkScript: pkScript,
+			Version:  payout.ScriptVersion,
+			PkScript: payout.Script,
 		})
 
 		totalSubsidy += dcrutil.Amount(payout.Amount)
@@ -2466,7 +2458,7 @@ func (g *Generator) AssertTipBlockSigOpsCount(expected int) {
 	}
 }
 
-// AssertTipBlockSize panics if the if the current tip block associated with the
+// AssertTipBlockSize panics if the current tip block associated with the
 // generator does not have the specified size when serialized.
 func (g *Generator) AssertTipBlockSize(expected int) {
 	serializeSize := g.tip.SerializeSize()

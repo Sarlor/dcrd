@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2018 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/wire"
 )
@@ -202,7 +201,7 @@ func sigHashPrefixSerializeSize(hashType SigHashType, txIns []*wire.TxIn, txOuts
 // sigHashWitnessSerializeSize returns the number of bytes the passed parameters
 // would take when encoded with the format used by the witness hash portion of
 // the overall signature hash.
-func sigHashWitnessSerializeSize(hashType SigHashType, txIns []*wire.TxIn, signScript []byte) int {
+func sigHashWitnessSerializeSize(txIns []*wire.TxIn, signScript []byte) int {
 	// 1) 4 bytes version/serialization type
 	// 2) number of inputs varint
 	// 3) per input:
@@ -222,12 +221,12 @@ func sigHashWitnessSerializeSize(hashType SigHashType, txIns []*wire.TxIn, signS
 		len(signScript)
 }
 
-// calcSignatureHash computes the signature hash for the specified input of
-// the target transaction observing the desired signature hash type.  The
-// cached prefix parameter allows the caller to optimize the calculation by
-// providing the prefix hash to be reused in the case of SigHashAll without the
+// calcSignatureHash computes the signature hash for the specified input of the
+// target transaction observing the desired signature hash type.  The cached
+// prefix parameter allows the caller to optimize the calculation by providing
+// the prefix hash to be reused in the case of SigHashAll without the
 // SigHashAnyOneCanPay flag set.
-func calcSignatureHash(prevOutScript []parsedOpcode, hashType SigHashType, tx *wire.MsgTx, idx int, cachedPrefix *chainhash.Hash) ([]byte, error) {
+func calcSignatureHash(signScript []byte, hashType SigHashType, tx *wire.MsgTx, idx int, cachedPrefix *chainhash.Hash) ([]byte, error) {
 	// The SigHashSingle signature type signs only the corresponding input
 	// and output (the output with the same index number as the input).
 	//
@@ -239,13 +238,6 @@ func calcSignatureHash(prevOutScript []parsedOpcode, hashType SigHashType, tx *w
 			">= %d outputs", idx, len(tx.TxOut))
 		return nil, scriptError(ErrInvalidSigHashSingleIndex, str)
 	}
-
-	// Remove all instances of OP_CODESEPARATOR from the script.
-	//
-	// The call to unparseScript cannot fail here because removeOpcode
-	// only returns a valid script.
-	prevOutScript = removeOpcode(prevOutScript, OP_CODESEPARATOR)
-	signScript, _ := unparseScript(prevOutScript)
 
 	// Choose the inputs that will be committed to based on the signature
 	// hash type.
@@ -282,7 +274,7 @@ func calcSignatureHash(prevOutScript []parsedOpcode, hashType SigHashType, tx *w
 	//   set, commits to all inputs.
 	//
 	// With the relevant inputs and outputs selected and the aforementioned
-	// substitions, the prefix hash consists of the hash of the
+	// substitutions, the prefix hash consists of the hash of the
 	// serialization of the following fields:
 	//
 	// 1) txversion|(SigHashSerializePrefix<<16) (as little-endian uint32)
@@ -306,7 +298,7 @@ func calcSignatureHash(prevOutScript []parsedOpcode, hashType SigHashType, tx *w
 	// can be reused because only the witness data has been modified, so
 	// the wasteful extra O(N^2) hash can be avoided.
 	var prefixHash chainhash.Hash
-	if chaincfg.SigHashOptimization && cachedPrefix != nil &&
+	if optimizeSigVerification && cachedPrefix != nil &&
 		hashType&sigHashMask == SigHashAll &&
 		hashType&SigHashAnyOneCanPay == 0 {
 
@@ -411,7 +403,7 @@ func calcSignatureHash(prevOutScript []parsedOpcode, hashType SigHashType, tx *w
 	//    a) length of prevout pkscript (as varint)
 	//    b) prevout pkscript (as unmodified bytes)
 
-	size := sigHashWitnessSerializeSize(hashType, txIns, signScript)
+	size := sigHashWitnessSerializeSize(txIns, signScript)
 	witnessBuf := make([]byte, size)
 
 	// Commit to the version and hash serialization type.
@@ -452,11 +444,15 @@ func calcSignatureHash(prevOutScript []parsedOpcode, hashType SigHashType, tx *w
 // cached prefix parameter allows the caller to optimize the calculation by
 // providing the prefix hash to be reused in the case of SigHashAll without the
 // SigHashAnyOneCanPay flag set.
+//
+// NOTE: This function is only valid for version 0 scripts.  Since the function
+// does not accept a script version, the results are undefined for other script
+// versions.
 func CalcSignatureHash(script []byte, hashType SigHashType, tx *wire.MsgTx, idx int, cachedPrefix *chainhash.Hash) ([]byte, error) {
-	pops, err := parseScript(script)
-	if err != nil {
+	const scriptVersion = 0
+	if err := checkScriptParses(scriptVersion, script); err != nil {
 		return nil, err
 	}
 
-	return calcSignatureHash(pops, hashType, tx, idx, cachedPrefix)
+	return calcSignatureHash(script, hashType, tx, idx, cachedPrefix)
 }

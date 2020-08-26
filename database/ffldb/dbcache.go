@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/goleveldb/leveldb"
-	"github.com/btcsuite/goleveldb/leveldb/iterator"
-	"github.com/btcsuite/goleveldb/leveldb/util"
-	"github.com/decred/dcrd/database/internal/treap"
+	"github.com/decred/dcrd/database/v2/internal/treap"
+	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/iterator"
+	"github.com/syndtr/goleveldb/leveldb/util"
 )
 
 const (
@@ -468,9 +468,9 @@ func (c *dbCache) commitTreaps(pendingKeys, pendingRemove TreapForEacher) error 
 	})
 }
 
-// flush flushes the database cache to persistent storage.  This involes syncing
-// the block store and replaying all transactions that have been applied to the
-// cache to the underlying database.
+// flush flushes the database cache to persistent storage.  This involves
+// syncing the block store and replaying all transactions that have been
+// applied to the cache to the underlying database.
 //
 // This function MUST be called with the database write lock held.
 func (c *dbCache) flush() error {

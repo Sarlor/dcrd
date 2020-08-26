@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -11,10 +11,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/decred/dcrd/chaincfg"
-	"github.com/decred/dcrd/database"
-	_ "github.com/decred/dcrd/database/ffldb"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/database/v2"
+	_ "github.com/decred/dcrd/database/v2/ffldb"
+	"github.com/decred/dcrd/dcrutil/v3"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -24,14 +24,14 @@ func ExampleCreate() {
 	//
 	// import (
 	// 	"github.com/decred/dcrd/database2"
-	// 	_ "github.com/decred/dcrd/database/ffldb"
+	// 	_ "github.com/decred/dcrd/database/v2/ffldb"
 	// )
 
 	// Create a database and schedule it to be closed and removed on exit.
 	// Typically you wouldn't want to remove the database right away like
 	// this, nor put it in the temp directory, but it's done here to ensure
 	// the example cleans up after itself.
-	dbPath := filepath.Join(os.TempDir(), "examplecreate")
+	dbPath := filepath.Join(os.TempDir(), "examplecreate-v2")
 	db, err := database.Create("ffldb", dbPath, wire.MainNet)
 	if err != nil {
 		fmt.Println(err)
@@ -50,14 +50,14 @@ func Example_basicUsage() {
 	//
 	// import (
 	// 	"github.com/decred/dcrd/database2"
-	// 	_ "github.com/decred/dcrd/database/ffldb"
+	// 	_ "github.com/decred/dcrd/database/v2/ffldb"
 	// )
 
 	// Create a database and schedule it to be closed and removed on exit.
 	// Typically you wouldn't want to remove the database right away like
 	// this, nor put it in the temp directory, but it's done here to ensure
 	// the example cleans up after itself.
-	dbPath := filepath.Join(os.TempDir(), "exampleusage")
+	dbPath := filepath.Join(os.TempDir(), "exampleusage-v2")
 	db, err := database.Create("ffldb", dbPath, wire.MainNet)
 	if err != nil {
 		fmt.Println(err)
@@ -116,14 +116,14 @@ func Example_blockStorageAndRetrieval() {
 	//
 	// import (
 	// 	"github.com/decred/dcrd/database2"
-	// 	_ "github.com/decred/dcrd/database/ffldb"
+	// 	_ "github.com/decred/dcrd/database/v2/ffldb"
 	// )
 
 	// Create a database and schedule it to be closed and removed on exit.
 	// Typically you wouldn't want to remove the database right away like
 	// this, nor put it in the temp directory, but it's done here to ensure
 	// the example cleans up after itself.
-	dbPath := filepath.Join(os.TempDir(), "exampleblkstorage")
+	dbPath := filepath.Join(os.TempDir(), "exampleblkstorage-v2")
 	db, err := database.Create("ffldb", dbPath, wire.MainNet)
 	if err != nil {
 		fmt.Println(err)
@@ -135,9 +135,9 @@ func Example_blockStorageAndRetrieval() {
 	// Use the Update function of the database to perform a managed
 	// read-write transaction and store a genesis block in the database as
 	// and example.
+	mainNetParams := chaincfg.MainNetParams()
 	err = db.Update(func(tx database.Tx) error {
-		genesisBlock := chaincfg.MainNetParams.GenesisBlock
-		return tx.StoreBlock(dcrutil.NewBlock(genesisBlock))
+		return tx.StoreBlock(dcrutil.NewBlock(mainNetParams.GenesisBlock))
 	})
 	if err != nil {
 		fmt.Println(err)
@@ -148,8 +148,7 @@ func Example_blockStorageAndRetrieval() {
 	// transaction and fetch the block stored above.
 	var loadedBlockBytes []byte
 	err = db.Update(func(tx database.Tx) error {
-		genesisHash := chaincfg.MainNetParams.GenesisHash
-		blockBytes, err := tx.FetchBlock(genesisHash)
+		blockBytes, err := tx.FetchBlock(&mainNetParams.GenesisHash)
 		if err != nil {
 			return err
 		}

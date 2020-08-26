@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2017 The btcsuite developers
-// Copyright (c) 2015-2018 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -11,14 +11,18 @@ import (
 	"path/filepath"
 
 	"github.com/decred/dcrd/addrmgr"
-	"github.com/decred/dcrd/blockchain"
-	"github.com/decred/dcrd/blockchain/indexers"
-	"github.com/decred/dcrd/blockchain/stake"
-	"github.com/decred/dcrd/connmgr"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/mempool"
-	"github.com/decred/dcrd/peer"
-	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/blockchain/stake/v3"
+	"github.com/decred/dcrd/blockchain/v3"
+	"github.com/decred/dcrd/blockchain/v3/indexers"
+	"github.com/decred/dcrd/connmgr/v3"
+	"github.com/decred/dcrd/database/v2"
+	"github.com/decred/dcrd/internal/fees"
+	"github.com/decred/dcrd/internal/mempool"
+	"github.com/decred/dcrd/internal/mining"
+	"github.com/decred/dcrd/internal/mining/cpuminer"
+	"github.com/decred/dcrd/internal/rpcserver"
+	"github.com/decred/dcrd/peer/v2"
+	"github.com/decred/dcrd/txscript/v3"
 	"github.com/decred/slog"
 	"github.com/jrick/logrotate/rotator"
 )
@@ -35,7 +39,7 @@ func (logWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// Loggers per subsystem.  A single backend logger is created and all subsytem
+// Loggers per subsystem.  A single backend logger is created and all subsystem
 // loggers created from it will write to the backend.  When adding new
 // subsystems, add the subsystem logger variable here and to the
 // subsystemLoggers map.
@@ -55,12 +59,13 @@ var (
 
 	adxrLog = backendLog.Logger("ADXR")
 	amgrLog = backendLog.Logger("AMGR")
-	cmgrLog = backendLog.Logger("CMGR")
 	bcdbLog = backendLog.Logger("BCDB")
 	bmgrLog = backendLog.Logger("BMGR")
-	dcrdLog = backendLog.Logger("DCRD")
 	chanLog = backendLog.Logger("CHAN")
+	cmgrLog = backendLog.Logger("CMGR")
+	dcrdLog = backendLog.Logger("DCRD")
 	discLog = backendLog.Logger("DISC")
+	feesLog = backendLog.Logger("FEES")
 	indxLog = backendLog.Logger("INDX")
 	minrLog = backendLog.Logger("MINR")
 	peerLog = backendLog.Logger("PEER")
@@ -74,26 +79,31 @@ var (
 // Initialize package-global logger variables.
 func init() {
 	addrmgr.UseLogger(amgrLog)
+	blockchain.UseLogger(chanLog)
 	connmgr.UseLogger(cmgrLog)
 	database.UseLogger(bcdbLog)
-	blockchain.UseLogger(chanLog)
+	fees.UseLogger(feesLog)
 	indexers.UseLogger(indxLog)
-	peer.UseLogger(peerLog)
-	txscript.UseLogger(scrpLog)
-	stake.UseLogger(stkeLog)
 	mempool.UseLogger(txmpLog)
+	mining.UseLogger(minrLog)
+	cpuminer.UseLogger(minrLog)
+	peer.UseLogger(peerLog)
+	rpcserver.UseLogger(rpcsLog)
+	stake.UseLogger(stkeLog)
+	txscript.UseLogger(scrpLog)
 }
 
 // subsystemLoggers maps each subsystem identifier to its associated logger.
 var subsystemLoggers = map[string]slog.Logger{
 	"ADXR": adxrLog,
 	"AMGR": amgrLog,
-	"CMGR": cmgrLog,
 	"BCDB": bcdbLog,
 	"BMGR": bmgrLog,
-	"DCRD": dcrdLog,
 	"CHAN": chanLog,
+	"CMGR": cmgrLog,
+	"DCRD": dcrdLog,
 	"DISC": discLog,
+	"FEES": feesLog,
 	"INDX": indxLog,
 	"MINR": minrLog,
 	"PEER": peerLog,
@@ -104,9 +114,9 @@ var subsystemLoggers = map[string]slog.Logger{
 	"TXMP": txmpLog,
 }
 
-// initLogRotator initializes the logging rotater to write logs to logFile and
+// initLogRotator initializes the logging rotator to write logs to logFile and
 // create roll files in the same directory.  It must be called before the
-// package-global log rotater variables are used.
+// package-global log rotator variables are used.
 func initLogRotator(logFile string) {
 	logDir, _ := filepath.Split(logFile)
 	err := os.MkdirAll(logDir, 0700)
@@ -156,6 +166,15 @@ func directionString(inbound bool) string {
 		return "inbound"
 	}
 	return "outbound"
+}
+
+// pickNoun returns the singular or plural form of a noun depending
+// on the count n.
+func pickNoun(n uint64, singular, plural string) string {
+	if n == 1 {
+		return singular
+	}
+	return plural
 }
 
 // fatalf logs a string, then cleanly exits.

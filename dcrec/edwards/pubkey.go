@@ -22,20 +22,21 @@ const (
 type PublicKey ecdsa.PublicKey
 
 // NewPublicKey instantiates a new public key.
-func NewPublicKey(curve *TwistedEdwardsCurve, x *big.Int, y *big.Int) *PublicKey {
-	return &PublicKey{curve, x, y}
+func NewPublicKey(x *big.Int, y *big.Int) *PublicKey {
+	return &PublicKey{Edwards(), x, y}
 }
 
 // ParsePubKey parses a public key for an edwards curve from a bytestring into a
 // ecdsa.Publickey, verifying that it is valid.
-func ParsePubKey(curve *TwistedEdwardsCurve, pubKeyStr []byte) (key *PublicKey, err error) {
+func ParsePubKey(pubKeyStr []byte) (key *PublicKey, err error) {
 	if len(pubKeyStr) == 0 {
 		return nil, errors.New("pubkey string is empty")
 	}
 
+	curve := Edwards()
 	pubkey := PublicKey{}
 	pubkey.Curve = curve
-	x, y, err := curve.EncodedBytesToBigIntPoint(copyBytes(pubKeyStr))
+	x, y, err := curve.encodedBytesToBigIntPoint(copyBytes(pubKeyStr))
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +64,7 @@ func (p PublicKey) Serialize() []byte {
 	if p.X == nil || p.Y == nil {
 		return nil
 	}
-	return BigIntPointToEncodedBytes(p.X, p.Y)[:]
+	return bigIntPointToEncodedBytes(p.X, p.Y)[:]
 }
 
 // SerializeUncompressed satisfies the chainec PublicKey interface.

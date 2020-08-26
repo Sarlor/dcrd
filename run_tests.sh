@@ -1,102 +1,68 @@
 #!/usr/bin/env bash
 
-# usage:
-# ./run_tests.sh                         # local, go 1.11
-# GOVERSION=1.10 ./run_tests.sh          # local, go 1.10 (vgo)
-# ./run_tests.sh docker                  # docker, go 1.11
-# GOVERSION=1.10 ./run_tests.sh docker   # docker, go 1.10 (vgo)
-# ./run_tests.sh podman                  # podman, go 1.11
-# GOVERSION=1.10 ./run_tests.sh podman   # podman, go 1.10 (vgo)
-
 set -ex
 
 # The script does automatic checking on a Go package and its sub-packages,
 # including:
-# 1. gofmt         (http://golang.org/cmd/gofmt/)
+# 1. gofmt         (https://golang.org/cmd/gofmt/)
 # 2. gosimple      (https://github.com/dominikh/go-simple)
 # 3. unconvert     (https://github.com/mdempsky/unconvert)
 # 4. ineffassign   (https://github.com/gordonklaus/ineffassign)
-# 5. race detector (http://blog.golang.org/race-detector)
+# 5. go vet        (https://golang.org/cmd/vet)
+# 6. misspell      (https://github.com/client9/misspell)
 
-# gometalinter (github.com/alecthomas/gometalinter) is used to run each each
+# golangci-lint (github.com/golangci/golangci-lint) is used to run each
 # static checker.
 
-# To run on docker on windows, symlink /mnt/c to /c and then execute the script
-# from the repo path under /c.  See:
-# https://github.com/Microsoft/BashOnWindows/issues/1854
-# for more details.
-
-# Default GOVERSION
-[[ ! "$GOVERSION" ]] && GOVERSION=1.11
 REPO=dcrd
 
-testrepo () {
-  GO=go
-  if [[ $GOVERSION == 1.10 ]]; then
-    GO=vgo
-  fi
+go version
 
-  $GO version
+# binary needed for RPC tests
+env CC=gcc go build
+cp "$REPO" "$(go env GOPATH)/bin/"
 
-  # binary needed for RPC tests
-  env CC=gcc $GO build
-  cp "$REPO" "$GOPATH/bin/"
-
-  # run tests on all modules
-  ROOTPATH=$($GO list -m -f {{.Dir}} 2>/dev/null)
-  ROOTPATHPATTERN=$(echo $ROOTPATH | sed 's/\\/\\\\/g' | sed 's/\//\\\//g')
-  MODPATHS=$($GO list -m -f {{.Dir}} all 2>/dev/null | grep "^$ROOTPATHPATTERN"\
-    | sed -e "s/^$ROOTPATHPATTERN//" -e 's/^\\//' -e 's/^\///')
-  MODPATHS=". $MODPATHS"
-  for module in $MODPATHS; do
-    echo "==> ${module}"
-    (cd $module && env GORACE='halt_on_error=1' CC=gcc $GO test -short -race \
-	  -tags rpctest ./...)
-  done
+# run tests on all modules
+ROOTPATH=$(go list -m)
+ROOTPATHPATTERN=$(echo $ROOTPATH | sed 's/\\/\\\\/g' | sed 's/\//\\\//g')
+MODPATHS=$(go list -m all | grep "^$ROOTPATHPATTERN" | cut -d' ' -f1)
+for module in $MODPATHS; do
+  echo "==> ${module}"
+  env CC=gcc go test -short -tags rpctest ${module}/...
 
   # check linters
-  if [[ $GOVERSION != 1.10 ]]; then
-    # linters do not work with modules yet
-    go mod vendor
-    unset GO111MODULE
+  MODNAME=$(echo $module | sed -E -e "s/^$ROOTPATHPATTERN//" \
+    -e 's,^/,,' -e 's,/v[0-9]+$,,')
+  if [ -z "$MODNAME" ]; then
+    MODNAME=.
+  fi
 
-    gometalinter --vendor --disable-all --deadline=10m \
+  # run commands in the module directory as a subshell
+  (
+    cd $MODNAME
+
+    # run `go mod download` and `go mod tidy` and fail if the git status of
+    # go.mod and/or go.sum changes
+    MOD_STATUS=$(git status --porcelain go.mod go.sum)
+    go mod download
+    go mod tidy
+    UPDATED_MOD_STATUS=$(git status --porcelain go.mod go.sum)
+    if [ "$UPDATED_MOD_STATUS" != "$MOD_STATUS" ]; then
+      echo "Running `go mod tidy` modified go.mod and/or go.sum"
+      exit 1
+    fi
+
+    # run linters
+    golangci-lint run --build-tags=rpctest --disable-all --deadline=10m \
       --enable=gofmt \
       --enable=gosimple \
       --enable=unconvert \
       --enable=ineffassign \
-      ./...
-    if [ $? != 0 ]; then
-      echo 'gometalinter has some complaints'
-      exit 1
-    fi
-  fi
+      --enable=govet \
+      --enable=misspell \
+      --enable=deadcode \
+  )
+done
 
-  echo "------------------------------------------"
-  echo "Tests completed successfully!"
-}
-
-DOCKER=
-[[ "$1" == "docker" || "$1" == "podman" ]] && DOCKER=$1
-if [ ! "$DOCKER" ]; then
-    testrepo
-    exit
-fi
-
-# use Travis cache with docker
-DOCKER_IMAGE_TAG=decred-golang-builder-$GOVERSION
-mkdir -p ~/.cache
-if [ -f ~/.cache/$DOCKER_IMAGE_TAG.tar ]; then
-  # load via cache
-  $DOCKER load -i ~/.cache/$DOCKER_IMAGE_TAG.tar
-else
-  # pull and save image to cache
-  $DOCKER pull decred/$DOCKER_IMAGE_TAG
-  $DOCKER save decred/$DOCKER_IMAGE_TAG > ~/.cache/$DOCKER_IMAGE_TAG.tar
-fi
-
-$DOCKER run --rm -it -v $(pwd):/src:Z decred/$DOCKER_IMAGE_TAG /bin/bash -c "\
-  rsync -ra --filter=':- .gitignore'  \
-  /src/ /go/src/github.com/decred/$REPO/ && \
-  cd github.com/decred/$REPO/ && \
-  env GOVERSION=$GOVERSION GO111MODULE=on bash run_tests.sh"
+echo "------------------------------------------"
+echo "Tests completed successfully!"

@@ -1,190 +1,232 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package secp256k1
 
+// References:
+//   [SEC1] Elliptic Curve Cryptography
+//     https://www.secg.org/sec1-v2.pdf
+//
+//   [SEC2] Recommended Elliptic Curve Domain Parameters
+//     https://www.secg.org/sec2-v2.pdf
+//
+//   [ANSI X9.62-1998] Public Key Cryptography For The Financial Services
+//     Industry: The Elliptic Curve Digital Signature Algorithm (ECDSA)
+
 import (
-	"crypto/ecdsa"
-	"errors"
 	"fmt"
-	"math/big"
 )
 
-// These constants define the lengths of serialized public keys.
 const (
-	PubKeyBytesLenCompressed   = 33
+	// PubKeyBytesLenCompressed is the number of bytes of a serialized
+	// compressed public key.
+	PubKeyBytesLenCompressed = 33
+
+	// PubKeyBytesLenCompressed is the number of bytes of a serialized
+	// uncompressed public key.
 	PubKeyBytesLenUncompressed = 65
+
+	// PubKeyFormatCompressedEven is the identifier prefix byte for a public key
+	// whose Y coordinate is even when serialized in the compressed format per
+	// section 2.3.4 of [SEC1](https://secg.org/sec1-v2.pdf#subsubsection.2.3.4).
+	PubKeyFormatCompressedEven byte = 0x02
+
+	// PubKeyFormatCompressedOdd is the identifier prefix byte for a public key
+	// whose Y coordinate is odd when serialized in the compressed format per
+	// section 2.3.4 of [SEC1](https://secg.org/sec1-v2.pdf#subsubsection.2.3.4).
+	PubKeyFormatCompressedOdd byte = 0x03
+
+	// PubKeyFormatUncompressed is the identifier prefix byte for a public key
+	// when serialized according in the uncompressed format per section 2.3.3 of
+	// [SEC1](https://secg.org/sec1-v2.pdf#subsubsection.2.3.3).
+	PubKeyFormatUncompressed byte = 0x04
+
+	// PubKeyFormatHybridEven is the identifier prefix byte for a public key
+	// whose Y coordinate is even when serialized according to the hybrid format
+	// per section 4.3.6 of [ANSI X9.62-1998].
+	//
+	// NOTE: This format makes little sense in practice an therefore this
+	// package will not produce public keys serialized in this format.  However,
+	// it will parse them since they exist in the wild.
+	PubKeyFormatHybridEven byte = 0x06
+
+	// PubKeyIDHybridEven is the identifier prefix byte for a public key whose Y
+	// coordingate is odd when serialized according to the hybrid format per
+	// section 4.3.6 of [ANSI X9.62-1998].
+	//
+	// NOTE: This format makes little sense in practice an therefore this
+	// package will not produce public keys serialized in this format.  However,
+	// it will parse them since they exist in the wild.
+	PubKeyFormatHybridOdd byte = 0x07
 )
 
-func isOdd(a *big.Int) bool {
-	return a.Bit(0) == 1
+// PublicKey provides facilities for efficiently working with secp256k1 public
+// keys within this package and includes functions to serialize in both
+// uncompressed and compressed SEC (Standards for Efficient Cryptography)
+// formats.
+type PublicKey struct {
+	x FieldVal
+	y FieldVal
 }
 
-// decompressPoint decompresses a point on the given curve given the X point and
-// the solution to use.
-func decompressPoint(x *big.Int, ybit bool) (*big.Int, error) {
-	// TODO(oga) This will probably only work for secp256k1 due to
-	// optimizations.
-
-	curve := S256()
-	// Y = +-sqrt(x^3 + B)
-	x3 := new(big.Int).Mul(x, x)
-	x3.Mul(x3, x)
-	x3.Add(x3, curve.Params().B)
-
-	// now calculate sqrt mod p of x2 + B
-	// This code used to do a full sqrt based on tonelli/shanks,
-	// but this was replaced by the algorithms referenced in
-	// https://bitcointalk.org/index.php?topic=162805.msg1712294#msg1712294
-	y := new(big.Int).Exp(x3, curve.QPlus1Div4(), curve.Params().P)
-
-	if ybit != isOdd(y) {
-		y.Sub(curve.Params().P, y)
-	}
-	if ybit != isOdd(y) {
-		return nil, fmt.Errorf("ybit doesn't match oddness")
-	}
-	return y, nil
+// NewPublicKey instantiates a new public key with the given x and y
+// coordinates.
+//
+// It should be noted that, unlike ParsePubKey, since this accepts arbitrary x
+// and y coordinates, it allows creation of public keys that are not valid
+// points on the secp256k1 curve.  The IsOnCurve method of the returned instance
+// can be used to determine validity.
+func NewPublicKey(x, y *FieldVal) *PublicKey {
+	var pubKey PublicKey
+	pubKey.x.Set(x)
+	pubKey.y.Set(y)
+	return &pubKey
 }
 
-const (
-	pubkeyCompressed   byte = 0x2 // y_bit + x coord
-	pubkeyUncompressed byte = 0x4 // x coord + y coord
-)
-
-// NewPublicKey instantiates a new public key with the given X,Y coordinates.
-func NewPublicKey(x *big.Int, y *big.Int) *PublicKey {
-	return &PublicKey{S256(), x, y}
-}
-
-// ParsePubKey parses a public key for a koblitz curve from a bytestring into a
-// ecdsa.Publickey, verifying that it is valid. It supports compressed and
-// uncompressed signature formats, but not the hybrid format.
-func ParsePubKey(pubKeyStr []byte) (key *PublicKey,
-	err error) {
-	pubkey := PublicKey{}
-	pubkey.Curve = S256()
-
-	if len(pubKeyStr) == 0 {
-		return nil, errors.New("pubkey string is empty")
-	}
-
-	format := pubKeyStr[0]
-	ybit := (format & 0x1) == 0x1
-	format &= ^byte(0x1)
-
-	switch len(pubKeyStr) {
+// ParsePubKey parses a secp256k1 public key encoded according to the format
+// specified by ANSI X9.62-1998, which means it is also compatible with the
+// SEC (Standards for Efficient Cryptography) specification which is a subset of
+// the former.  In other words, it supports the uncompressed, compressed, and
+// hybrid formats as follows:
+//
+// Compressed:
+//   <format byte = 0x02/0x03><32-byte X coordinate>
+// Uncompressed:
+//   <format byte = 0x04><32-byte X coordinate><32-byte Y coordinate>
+// Hybrid:
+//   <format byte = 0x05/0x06><32-byte X coordinate><32-byte Y coordinate>
+//
+// NOTE: The hybrid format makes little sense in practice an therefore this
+// package will not produce public keys serialized in this format.  However,
+// this function will properly parse them since they exist in the wild.
+func ParsePubKey(serialized []byte) (key *PublicKey, err error) {
+	var x, y FieldVal
+	switch len(serialized) {
 	case PubKeyBytesLenUncompressed:
-		if format != pubkeyUncompressed {
-			return nil, fmt.Errorf("invalid magic in pubkey str: "+
-				"%d", pubKeyStr[0])
+		// Reject unsupported public key formats for the given length.
+		format := serialized[0]
+		switch format {
+		case PubKeyFormatUncompressed:
+		case PubKeyFormatHybridEven, PubKeyFormatHybridOdd:
+		default:
+			str := fmt.Sprintf("invalid public key: unsupported format: %x",
+				format)
+			return nil, makeError(ErrPubKeyInvalidFormat, str)
 		}
 
-		pubkey.X = new(big.Int).SetBytes(pubKeyStr[1:33])
-		pubkey.Y = new(big.Int).SetBytes(pubKeyStr[33:])
+		// Parse the x and y coordinates while ensuring that they are in the
+		// allowed range.
+		if overflow := x.SetByteSlice(serialized[1:33]); overflow {
+			str := "invalid public key: x >= field prime"
+			return nil, makeError(ErrPubKeyXTooBig, str)
+		}
+		if overflow := y.SetByteSlice(serialized[33:]); overflow {
+			str := "invalid public key: y >= field prime"
+			return nil, makeError(ErrPubKeyYTooBig, str)
+		}
+
+		// Ensure the oddness of the y coordinate matches the specified format
+		// for hybrid public keys.
+		if format == PubKeyFormatHybridEven || format == PubKeyFormatHybridOdd {
+			wantOddY := format == PubKeyFormatHybridOdd
+			if y.IsOdd() != wantOddY {
+				str := fmt.Sprintf("invalid public key: y oddness does not "+
+					"match specified value of %v", wantOddY)
+				return nil, makeError(ErrPubKeyMismatchedOddness, str)
+			}
+		}
+
+		// Reject public keys that are not on the secp256k1 curve.
+		if !isOnCurve(&x, &y) {
+			str := fmt.Sprintf("invalid public key: [%v,%v] not on secp256k1 "+
+				"curve", x, y)
+			return nil, makeError(ErrPubKeyNotOnCurve, str)
+		}
+
 	case PubKeyBytesLenCompressed:
-		// format is 0x2 | solution, <X coordinate>
-		// solution determines which solution of the curve we use.
-		/// y^2 = x^3 + Curve.B
-		if format != pubkeyCompressed {
-			return nil, fmt.Errorf("invalid magic in compressed "+
-				"pubkey string: %d", pubKeyStr[0])
+		// Reject unsupported public key formats for the given length.
+		format := serialized[0]
+		switch format {
+		case PubKeyFormatCompressedEven, PubKeyFormatCompressedOdd:
+		default:
+			str := fmt.Sprintf("invalid public key: unsupported format: %x",
+				format)
+			return nil, makeError(ErrPubKeyInvalidFormat, str)
 		}
-		pubkey.X = new(big.Int).SetBytes(pubKeyStr[1:33])
-		pubkey.Y, err = decompressPoint(pubkey.X, ybit)
-		if err != nil {
-			return nil, err
+
+		// Parse the x coordinate while ensuring that it is in the allowed
+		// range.
+		if overflow := x.SetByteSlice(serialized[1:33]); overflow {
+			str := "invalid public key: x >= field prime"
+			return nil, makeError(ErrPubKeyXTooBig, str)
 		}
-	default: // wrong!
-		return nil, fmt.Errorf("invalid pub key length %d",
-			len(pubKeyStr))
+
+		// Attempt to calculate the y coordinate for the given x coordinate such
+		// that the result pair is a point on the secp256k1 curve and the
+		// solution with desired oddness is chosen.
+		wantOddY := format == PubKeyFormatCompressedOdd
+		if !DecompressY(&x, wantOddY, &y) {
+			str := fmt.Sprintf("invalid public key: x coordinate %v is not on "+
+				"the secp256k1 curve", x)
+			return nil, makeError(ErrPubKeyNotOnCurve, str)
+		}
+		y.Normalize()
+
+	default:
+		str := fmt.Sprintf("malformed public key: invalid length: %d",
+			len(serialized))
+		return nil, makeError(ErrPubKeyInvalidLen, str)
 	}
 
-	if pubkey.X.Cmp(pubkey.Curve.Params().P) >= 0 {
-		return nil, fmt.Errorf("pubkey X parameter is >= to P")
-	}
-	if pubkey.Y.Cmp(pubkey.Curve.Params().P) >= 0 {
-		return nil, fmt.Errorf("pubkey Y parameter is >= to P")
-	}
-	if !pubkey.Curve.IsOnCurve(pubkey.X, pubkey.Y) {
-		return nil, fmt.Errorf("pubkey [%v,%v] isn't on secp256k1 curve",
-			pubkey.X, pubkey.Y)
-	}
-	return &pubkey, nil
+	return NewPublicKey(&x, &y), nil
 }
 
-// PublicKey is an ecdsa.PublicKey with additional functions to
-// serialize in uncompressed and compressed formats.
-type PublicKey ecdsa.PublicKey
-
-// ToECDSA returns the public key as a *ecdsa.PublicKey.
-func (p PublicKey) ToECDSA() *ecdsa.PublicKey {
-	ecpk := ecdsa.PublicKey(p)
-	return &ecpk
-}
-
-// Serialize serializes a public key in a 33-byte compressed format.
-// It is the default serialization method.
-func (p PublicKey) Serialize() []byte {
-	return p.SerializeCompressed()
-}
-
-// SerializeUncompressed serializes a public key in a 65-byte uncompressed
+// SerializeUncompressed serializes a public key in the 65-byte uncompressed
 // format.
 func (p PublicKey) SerializeUncompressed() []byte {
-	b := make([]byte, 0, PubKeyBytesLenUncompressed)
-	b = append(b, pubkeyUncompressed)
-	b = paddedAppend(32, b, p.X.Bytes())
-	return paddedAppend(32, b, p.Y.Bytes())
+	// 0x04 || 32-byte x coordinate || 32-byte y coordinate
+	var b [PubKeyBytesLenUncompressed]byte
+	b[0] = PubKeyFormatUncompressed
+	p.x.PutBytesUnchecked(b[1:33])
+	p.y.PutBytesUnchecked(b[33:65])
+	return b[:]
 }
 
-// SerializeCompressed serializes a public key in a 33-byte compressed format.
+// SerializeCompressed serializes a public key in the 33-byte compressed format.
 func (p PublicKey) SerializeCompressed() []byte {
-	b := make([]byte, 0, PubKeyBytesLenCompressed)
-	format := pubkeyCompressed
-	if isOdd(p.Y) {
-		format |= 0x1
+	// Choose the format byte depending on the oddness of the Y coordinate.
+	format := PubKeyFormatCompressedEven
+	if p.y.IsOdd() {
+		format = PubKeyFormatCompressedOdd
 	}
-	b = append(b, format)
-	return paddedAppend(32, b, p.X.Bytes())
+
+	// 0x02 or 0x03 || 32-byte x coordinate
+	var b [PubKeyBytesLenCompressed]byte
+	b[0] = format
+	p.x.PutBytesUnchecked(b[1:33])
+	return b[:]
 }
 
 // IsEqual compares this PublicKey instance to the one passed, returning true if
 // both PublicKeys are equivalent. A PublicKey is equivalent to another, if they
 // both have the same X and Y coordinate.
 func (p *PublicKey) IsEqual(otherPubKey *PublicKey) bool {
-	return p.X.Cmp(otherPubKey.X) == 0 &&
-		p.Y.Cmp(otherPubKey.Y) == 0
+	return p.x.Equals(&otherPubKey.x) && p.y.Equals(&otherPubKey.y)
 }
 
-// paddedAppend appends the src byte slice to dst, returning the new slice.
-// If the length of the source is smaller than the passed size, leading zero
-// bytes are appended to the dst slice before appending src.
-func paddedAppend(size uint, dst, src []byte) []byte {
-	for i := 0; i < int(size)-len(src); i++ {
-		dst = append(dst, 0)
-	}
-	return append(dst, src...)
+// AsJacobian converts the public key into a Jacobian point with Z=1 and stores
+// the result in the provided result param.  This allows the public key to be
+// treated a Jacobian point in the secp256k1 group in calculations.
+func (p *PublicKey) AsJacobian(result *JacobianPoint) {
+	result.X.Set(&p.x)
+	result.Y.Set(&p.y)
+	result.Z.SetInt(1)
 }
 
-// GetCurve satisfies the chainec PublicKey interface.
-func (p PublicKey) GetCurve() interface{} {
-	return p.Curve
-}
-
-// GetX satisfies the chainec PublicKey interface.
-func (p PublicKey) GetX() *big.Int {
-	return p.X
-}
-
-// GetY satisfies the chainec PublicKey interface.
-func (p PublicKey) GetY() *big.Int {
-	return p.Y
-}
-
-// GetType satisfies the chainec PublicKey interface.
-func (p PublicKey) GetType() int {
-	return ecTypeSecp256k1
+// IsOnCurve returns whether or not the public key represents a point on the
+// secp256k1 curve.
+func (p *PublicKey) IsOnCurve() bool {
+	return isOnCurve(&p.x, &p.y)
 }

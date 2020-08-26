@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2017 The btcsuite developers
-// Copyright (c) 2018 The Decred developers
+// Copyright (c) 2018-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/decred/dcrd/blockchain/stake"
-	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/blockchain/stake/v3"
+	"github.com/decred/dcrd/blockchain/standalone/v2"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
+	"github.com/decred/dcrd/database/v2"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -33,9 +33,9 @@ const (
 	// statusDataStored indicates that the block's payload is stored on disk.
 	statusDataStored blockStatus = 1 << 0
 
-	// statusValid indicates that the block has been fully validated.  It also
-	// means that all of its ancestors have also been validated.
-	statusValid blockStatus = 1 << 1
+	// statusValidated indicates that the block has been fully validated.  It
+	// also means that all of its ancestors have also been validated.
+	statusValidated blockStatus = 1 << 1
 
 	// statusValidateFailed indicates that the block has failed validation.
 	statusValidateFailed blockStatus = 1 << 2
@@ -52,14 +52,26 @@ func (status blockStatus) HaveData() bool {
 	return status&statusDataStored != 0
 }
 
-// KnownValid returns whether the block is known to be valid.  This will return
-// false for a valid block that has not been fully validated yet.
-func (status blockStatus) KnownValid() bool {
-	return status&statusValid != 0
+// HasValidated returns whether the block is known to have been successfully
+// validated.  A return value of false in no way implies the block is invalid.
+// Thus, this will return false for a valid block that has not been fully
+// validated yet.
+//
+// NOTE: A block that is known to have been validated might also be marked as
+// known invalid as well if the block is manually invalidated.
+func (status blockStatus) HasValidated() bool {
+	return status&statusValidated != 0
 }
 
-// KnownInvalid returns whether the block is known to be invalid.  This will
-// return false for invalid blocks that have not been proven invalid yet.
+// KnownInvalid returns whether either the block itself is known to be invalid
+// or to have an invalid ancestor.  A return value of false in no way implies
+// the block is valid or only has valid ancestors.  Thus, this will return false
+// for invalid blocks that have not been proven invalid yet as well as return
+// false for blocks with invalid ancestors that have not been proven invalid
+// yet.
+//
+// NOTE: A block that is known invalid might also be marked as known to have
+// been successfully validated as well if the block is manually invalidated.
 func (status blockStatus) KnownInvalid() bool {
 	return status&(statusValidateFailed|statusInvalidAncestor) != 0
 }
@@ -77,6 +89,10 @@ type blockNode struct {
 
 	// parent is the parent block for this node.
 	parent *blockNode
+
+	// skipToAncestor is used to provide a skip list to significantly speed up
+	// traversal to ancestors deep in history.
+	skipToAncestor *blockNode
 
 	// hash is the hash of the block this node represents.
 	hash chainhash.Hash
@@ -108,7 +124,7 @@ type blockNode struct {
 	stakeVersion uint32
 
 	// status is a bitfield representing the validation state of the block.
-	// This field, unlike the other fields, may be changed after the block
+	// This field, unlike most other fields, may be changed after the block
 	// node is created, so it must only be accessed or updated using the
 	// concurrent-safe NodeStatus, SetStatusFlags, and UnsetStatusFlags
 	// methods on blockIndex once the node has been added to the index.
@@ -128,6 +144,38 @@ type blockNode struct {
 	votes []stake.VoteVersionTuple
 }
 
+// clearLowestOneBit clears the lowest set bit in the passed value.
+func clearLowestOneBit(n int64) int64 {
+	return n & (n - 1)
+}
+
+// calcSkipListHeight calculates the height of an ancestor block to use when
+// constructing the ancestor traversal skip list.
+func calcSkipListHeight(height int64) int64 {
+	if height < 0 {
+		return 0
+	}
+
+	// Traditional skip lists create multiple levels to achieve expected average
+	// search, insert, and delete costs of O(log n).  Since the blockchain is
+	// append only, there is no need to handle random insertions or deletions,
+	// so this takes advantage of that to effectively create a deterministic
+	// skip list with a single level that is reasonably close to O(log n) in
+	// order to reduce the number of pointers and implementation complexity.
+	//
+	// This calculation is definitely not the most optimal possible in terms of
+	// the number of steps in the worst case, however, it is predominantly
+	// logarithmic, easy to reason about, deterministic, blazing fast to
+	// calculate and can easily be shown to have a worst case performance of
+	// 420 steps for heights up to 4,294,967,296 (2^32) and 1580 steps for
+	// heights up to 2^63 - 1.
+	//
+	// Finally, it also satisfies the only real requirement for proper operation
+	// of the skip list which is for the calculated height to be less than the
+	// provided height.
+	return clearLowestOneBit(clearLowestOneBit(height))
+}
+
 // initBlockNode initializes a block node from the given header, initialization
 // vector for the ticket lottery, and parent node.  The workSum is calculated
 // based on the parent, or, in the case no parent is provided, it will just be
@@ -138,7 +186,7 @@ type blockNode struct {
 func initBlockNode(node *blockNode, blockHeader *wire.BlockHeader, parent *blockNode) {
 	*node = blockNode{
 		hash:         blockHeader.BlockHash(),
-		workSum:      CalcWork(blockHeader.Bits),
+		workSum:      standalone.CalcWork(blockHeader.Bits),
 		height:       int64(blockHeader.Height),
 		blockVersion: blockHeader.Version,
 		voteBits:     blockHeader.VoteBits,
@@ -156,9 +204,11 @@ func initBlockNode(node *blockNode, blockHeader *wire.BlockHeader, parent *block
 		nonce:        blockHeader.Nonce,
 		extraData:    blockHeader.ExtraData,
 		stakeVersion: blockHeader.StakeVersion,
+		status:       statusNone,
 	}
 	if parent != nil {
 		node.parent = parent
+		node.skipToAncestor = parent.Ancestor(calcSkipListHeight(node.height))
 		node.workSum = node.workSum.Add(parent.workSum, node.workSum)
 	}
 }
@@ -222,7 +272,7 @@ func (node *blockNode) lotteryIV() chainhash.Hash {
 	return stake.CalcHash256PRNGIV(buf.Bytes())
 }
 
-// populateTicketInfo sets prunable ticket information in the provided block
+// populateTicketInfo sets pruneable ticket information in the provided block
 // node.
 //
 // This function is NOT safe for concurrent access.  It must only be called when
@@ -245,8 +295,15 @@ func (node *blockNode) Ancestor(height int64) *blockNode {
 	}
 
 	n := node
-	for ; n != nil && n.height != height; n = n.parent {
-		// Intentionally left blank
+	for n != nil && n.height != height {
+		// Skip to the linked ancestor when it won't overshoot the target
+		// height.
+		if n.skipToAncestor != nil && calcSkipListHeight(n.height) >= height {
+			n = n.skipToAncestor
+			continue
+		}
+
+		n = n.parent
 	}
 
 	return n
@@ -300,6 +357,18 @@ func (node *blockNode) CalcPastMedianTime() time.Time {
 	return time.Unix(medianTimestamp, 0)
 }
 
+// chainTipEntry defines an entry used to track the chain tips and is structured
+// such that there is a single statically-allocated field to house a tip, and a
+// dynamically-allocated slice for the rare case when there are multiple
+// tips at the same height.
+//
+// This is done to reduce the number of allocations for the common case since
+// there is typically only a single tip at a given height.
+type chainTipEntry struct {
+	tip       *blockNode
+	otherTips []*blockNode
+}
+
 // blockIndex provides facilities for keeping track of an in-memory index of the
 // block chain.  Although the name block chain suggests a single chain of
 // blocks, it is actually a tree-shaped structure where any node can have
@@ -309,8 +378,7 @@ type blockIndex struct {
 	// The following fields are set when the instance is created and can't
 	// be changed afterwards, so there is no need to protect them with a
 	// separate mutex.
-	db          database.DB
-	chainParams *chaincfg.Params
+	db database.DB
 
 	// These following fields are protected by the embedded mutex.
 	//
@@ -321,22 +389,24 @@ type blockIndex struct {
 	// since the last time the index was flushed to disk.
 	//
 	// chainTips contains an entry with the tip of all known side chains.
+	//
+	// totalTips tracks the total number of all known chain tips.
 	sync.RWMutex
 	index     map[chainhash.Hash]*blockNode
 	modified  map[*blockNode]struct{}
-	chainTips map[int64][]*blockNode
+	chainTips map[int64]chainTipEntry
+	totalTips uint64
 }
 
 // newBlockIndex returns a new empty instance of a block index.  The index will
 // be dynamically populated as block nodes are loaded from the database and
 // manually added.
-func newBlockIndex(db database.DB, chainParams *chaincfg.Params) *blockIndex {
+func newBlockIndex(db database.DB) *blockIndex {
 	return &blockIndex{
-		db:          db,
-		chainParams: chainParams,
-		index:       make(map[chainhash.Hash]*blockNode),
-		modified:    make(map[*blockNode]struct{}),
-		chainTips:   make(map[int64][]*blockNode),
+		db:        db,
+		index:     make(map[chainhash.Hash]*blockNode),
+		modified:  make(map[*blockNode]struct{}),
+		chainTips: make(map[int64]chainTipEntry),
 	}
 }
 
@@ -385,29 +455,73 @@ func (bi *blockIndex) AddNode(node *blockNode) {
 //
 // This function MUST be called with the block index lock held (for writes).
 func (bi *blockIndex) addChainTip(tip *blockNode) {
-	bi.chainTips[tip.height] = append(bi.chainTips[tip.height], tip)
+	bi.totalTips++
+
+	// When an entry does not already exist for the given tip height, add an
+	// entry to the map with the tip stored in the statically-allocated field.
+	entry, ok := bi.chainTips[tip.height]
+	if !ok {
+		bi.chainTips[tip.height] = chainTipEntry{tip: tip}
+		return
+	}
+
+	// Otherwise, an entry already exists for the given tip height, so store the
+	// tip in the dynamically-allocated slice.
+	entry.otherTips = append(entry.otherTips, tip)
+	bi.chainTips[tip.height] = entry
 }
 
 // removeChainTip removes the passed block node from the available chain tips.
 //
 // This function MUST be called with the block index lock held (for writes).
 func (bi *blockIndex) removeChainTip(tip *blockNode) {
-	nodes := bi.chainTips[tip.height]
-	for i, n := range nodes {
-		if n == tip {
-			copy(nodes[i:], nodes[i+1:])
-			nodes[len(nodes)-1] = nil
-			nodes = nodes[:len(nodes)-1]
-			break
-		}
+	// Nothing to do if no tips exist at the given height.
+	entry, ok := bi.chainTips[tip.height]
+	if !ok {
+		return
 	}
 
-	// Either update the map entry for the height with the remaining nodes
-	// or remove it altogether if there are no more nodes left.
-	if len(nodes) == 0 {
-		delete(bi.chainTips, tip.height)
-	} else {
-		bi.chainTips[tip.height] = nodes
+	// The most common case is a single tip at the given height, so handle the
+	// case where the tip that is being removed is the tip that is stored in the
+	// statically-allocated field first.
+	if entry.tip == tip {
+		bi.totalTips--
+		entry.tip = nil
+
+		// Remove the map entry altogether if there are no more tips left.
+		if len(entry.otherTips) == 0 {
+			delete(bi.chainTips, tip.height)
+			return
+		}
+
+		// There are still tips stored in the dynamically-allocated slice, so
+		// move the first tip from it to the statically-allocated field, nil the
+		// slice so it can be garbage collected when there are no more items in
+		// it, and update the map with the modified entry accordingly.
+		entry.tip = entry.otherTips[0]
+		entry.otherTips = entry.otherTips[1:]
+		if len(entry.otherTips) == 0 {
+			entry.otherTips = nil
+		}
+		bi.chainTips[tip.height] = entry
+		return
+	}
+
+	// The tip being removed is not the tip stored in the statically-allocated
+	// field, so attempt to remove it from the dyanimcally-allocated slice.
+	for i, n := range entry.otherTips {
+		if n == tip {
+			bi.totalTips--
+
+			copy(entry.otherTips[i:], entry.otherTips[i+1:])
+			entry.otherTips[len(entry.otherTips)-1] = nil
+			entry.otherTips = entry.otherTips[:len(entry.otherTips)-1]
+			if len(entry.otherTips) == 0 {
+				entry.otherTips = nil
+			}
+			bi.chainTips[tip.height] = entry
+			return
+		}
 	}
 }
 

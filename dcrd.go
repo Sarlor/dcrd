@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -13,9 +13,8 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
-	"time"
 
-	"github.com/decred/dcrd/blockchain/indexers"
+	"github.com/decred/dcrd/blockchain/v3/indexers"
 	"github.com/decred/dcrd/internal/limits"
 	"github.com/decred/dcrd/internal/version"
 )
@@ -26,12 +25,15 @@ var cfg *config
 // as a service and reacts accordingly.
 var winServiceMain func() (bool, error)
 
+// serviceStartOfDayChan is only used by Windows when the code is running as a
+// service.  It signals the service code that startup has completed.  Notice
+// that it uses a buffered channel so the caller will not be blocked when the
+// service is not running.
+var serviceStartOfDayChan = make(chan *config, 1)
+
 // dcrdMain is the real main function for dcrd.  It is necessary to work around
-// the fact that deferred functions do not run when os.Exit() is called.  The
-// optional serverChan parameter is mainly used by the service code to be
-// notified with the server once it is setup so it can gracefully stop it when
-// requested from the service control manager.
-func dcrdMain(serverChan chan<- *server) error {
+// the fact that deferred functions do not run when os.Exit() is called.
+func dcrdMain() error {
 	// Load configuration and parse command line.  This function also
 	// initializes logging and configures it accordingly.
 	tcfg, _, err := loadConfig()
@@ -45,10 +47,10 @@ func dcrdMain(serverChan chan<- *server) error {
 		}
 	}()
 
-	// Get a channel that will be closed when a shutdown signal has been
+	// Get a context that will be canceled when a shutdown signal has been
 	// triggered either from an OS signal such as SIGINT (Ctrl+C) or from
 	// another subsystem such as the RPC server.
-	interrupt := interruptListener()
+	ctx := shutdownListener()
 	defer dcrdLog.Info("Shutdown complete")
 
 	// Show version and home dir at startup.
@@ -94,12 +96,8 @@ func dcrdMain(serverChan chan<- *server) error {
 			dcrdLog.Errorf("Unable to create mem profile: %v", err)
 			return err
 		}
-		timer := time.NewTimer(time.Minute * 20) // 20 minutes
-		go func() {
-			<-timer.C
-			pprof.WriteHeapProfile(f)
-			f.Close()
-		}()
+		defer f.Close()
+		defer pprof.WriteHeapProfile(f)
 	}
 
 	var lifetimeNotifier lifetimeEventServer
@@ -116,14 +114,14 @@ func dcrdMain(serverChan chan<- *server) error {
 		go drainOutgoingPipeMessages()
 	}
 
-	// Return now if an interrupt signal was triggered.
-	if interruptRequested(interrupt) {
+	// Return now if a shutdown signal was triggered.
+	if shutdownRequested(ctx) {
 		return nil
 	}
 
 	// Load the block database.
 	lifetimeNotifier.notifyStartupEvent(lifetimeEventDBOpen)
-	db, err := loadBlockDB()
+	db, err := loadBlockDB(cfg.params.Params)
 	if err != nil {
 		dcrdLog.Errorf("%v", err)
 		return err
@@ -135,8 +133,8 @@ func dcrdMain(serverChan chan<- *server) error {
 		db.Close()
 	}()
 
-	// Return now if an interrupt signal was triggered.
-	if interruptRequested(interrupt) {
+	// Return now if a shutdown signal was triggered.
+	if shutdownRequested(ctx) {
 		return nil
 	}
 
@@ -145,7 +143,7 @@ func dcrdMain(serverChan chan<- *server) error {
 	// NOTE: The order is important here because dropping the tx index also
 	// drops the address index since it relies on it.
 	if cfg.DropAddrIndex {
-		if err := indexers.DropAddrIndex(db, interrupt); err != nil {
+		if err := indexers.DropAddrIndex(ctx, db); err != nil {
 			dcrdLog.Errorf("%v", err)
 			return err
 		}
@@ -153,7 +151,7 @@ func dcrdMain(serverChan chan<- *server) error {
 		return nil
 	}
 	if cfg.DropTxIndex {
-		if err := indexers.DropTxIndex(db, interrupt); err != nil {
+		if err := indexers.DropTxIndex(ctx, db); err != nil {
 			dcrdLog.Errorf("%v", err)
 			return err
 		}
@@ -161,7 +159,7 @@ func dcrdMain(serverChan chan<- *server) error {
 		return nil
 	}
 	if cfg.DropExistsAddrIndex {
-		if err := indexers.DropExistsAddrIndex(db, interrupt); err != nil {
+		if err := indexers.DropExistsAddrIndex(ctx, db); err != nil {
 			dcrdLog.Errorf("%v", err)
 			return err
 		}
@@ -169,7 +167,7 @@ func dcrdMain(serverChan chan<- *server) error {
 		return nil
 	}
 	if cfg.DropCFIndex {
-		if err := indexers.DropCfIndex(db, interrupt); err != nil {
+		if err := indexers.DropCfIndex(ctx, db); err != nil {
 			dcrdLog.Errorf("%v", err)
 			return err
 		}
@@ -177,39 +175,31 @@ func dcrdMain(serverChan chan<- *server) error {
 		return nil
 	}
 
-	// Create server and start it.
+	// Create server.
 	lifetimeNotifier.notifyStartupEvent(lifetimeEventP2PServer)
-	server, err := newServer(cfg.Listeners, db, activeNetParams.Params,
-		interrupt)
+	svr, err := newServer(ctx, cfg.Listeners, db, cfg.params.Params,
+		cfg.DataDir)
 	if err != nil {
-		// TODO(oga) this logging could do with some beautifying.
-		dcrdLog.Errorf("Unable to start server on %v: %v",
-			cfg.Listeners, err)
+		dcrdLog.Errorf("Unable to start server: %v", err)
 		return err
 	}
-	defer func() {
-		lifetimeNotifier.notifyShutdownEvent(lifetimeEventP2PServer)
-		dcrdLog.Infof("Gracefully shutting down the server...")
-		server.Stop()
-		server.WaitForShutdown()
-		srvrLog.Infof("Server shutdown complete")
-	}()
 
-	server.Start()
-	if serverChan != nil {
-		serverChan <- server
-	}
-
-	if interruptRequested(interrupt) {
+	if shutdownRequested(ctx) {
 		return nil
 	}
 
 	lifetimeNotifier.notifyStartupComplete()
+	defer lifetimeNotifier.notifyShutdownEvent(lifetimeEventP2PServer)
 
-	// Wait until the interrupt signal is received from an OS signal or
+	// Signal the Windows service (if running) that startup has completed.
+	serviceStartOfDayChan <- cfg
+
+	// Run the server.  This will block until the context is cancelled which
+	// happens when the interrupt signal is received from an OS signal or
 	// shutdown is requested through one of the subsystems such as the RPC
 	// server.
-	<-interrupt
+	svr.Run(ctx)
+	srvrLog.Infof("Server shutdown complete")
 	return nil
 }
 
@@ -244,7 +234,7 @@ func main() {
 	}
 
 	// Work around defer not working after os.Exit()
-	if err := dcrdMain(nil); err != nil {
+	if err := dcrdMain(); err != nil {
 		os.Exit(1)
 	}
 }

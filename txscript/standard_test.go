@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2017 The btcsuite developers
-// Copyright (c) 2015-2018 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,14 +7,21 @@ package txscript
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
-	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/chaincfg/v3"
 	"github.com/decred/dcrd/dcrec"
-	"github.com/decred/dcrd/dcrec/secp256k1"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/dcrec/secp256k1/v3"
+	"github.com/decred/dcrd/dcrutil/v3"
 )
+
+// mainNetParams is an instance of the main network parameters and is shared
+// throughout the tests.
+var mainNetParams = chaincfg.MainNetParams()
 
 // mustParseShortForm parses the passed short form script and returns the
 // resulting bytes.  It panics if an error occurs.  This is only used in the
@@ -39,8 +46,7 @@ func newAddressPubKey(serializedPubKey []byte) dcrutil.Address {
 	if err != nil {
 		panic("invalid public key in test source")
 	}
-	addr, err := dcrutil.NewAddressSecpPubKeyCompressed(pubkey,
-		&chaincfg.MainNetParams)
+	addr, err := dcrutil.NewAddressSecpPubKeyCompressed(pubkey, mainNetParams)
 	if err != nil {
 		panic("invalid public key in test source")
 	}
@@ -53,7 +59,7 @@ func newAddressPubKey(serializedPubKey []byte) dcrutil.Address {
 // as a helper since the only way it can fail is if there is an error in the
 // test source code.
 func newAddressPubKeyHash(pkHash []byte) dcrutil.Address {
-	addr, err := dcrutil.NewAddressPubKeyHash(pkHash, &chaincfg.MainNetParams,
+	addr, err := dcrutil.NewAddressPubKeyHash(pkHash, mainNetParams,
 		dcrec.STEcdsaSecp256k1)
 	if err != nil {
 		panic("invalid public key hash in test source")
@@ -67,8 +73,7 @@ func newAddressPubKeyHash(pkHash []byte) dcrutil.Address {
 // as a helper since the only way it can fail is if there is an error in the
 // test source code.
 func newAddressScriptHash(scriptHash []byte) dcrutil.Address {
-	addr, err := dcrutil.NewAddressScriptHashFromHash(scriptHash,
-		&chaincfg.MainNetParams)
+	addr, err := dcrutil.NewAddressScriptHashFromHash(scriptHash, mainNetParams)
 	if err != nil {
 		panic("invalid script hash in test source")
 	}
@@ -81,6 +86,7 @@ func newAddressScriptHash(scriptHash []byte) dcrutil.Address {
 func TestExtractPkScriptAddrs(t *testing.T) {
 	t.Parallel()
 
+	const scriptVersion = 0
 	tests := []struct {
 		name    string
 		script  []byte
@@ -255,7 +261,7 @@ func TestExtractPkScriptAddrs(t *testing.T) {
 		// works with standard PkScripts, this should not return any
 		// addresses.
 		{
-			name: "valid sigscript to reedeem p2pk - no addresses",
+			name: "valid sigscript to redeem p2pk - no addresses",
 			script: hexToBytes("493046022100ddc69738bf2336318e4e0" +
 				"41a5a77f305da87428ab1606f023260017854350ddc0" +
 				"22100817af09d2eec36862d16009852b7e3a0f6dd765" +
@@ -267,17 +273,18 @@ func TestExtractPkScriptAddrs(t *testing.T) {
 			reqSigs: 0,
 			class:   NonStandardTy,
 		},
-		// from real tx 691dd277dc0e90a462a3d652a1171686de49cf19067cd33c7df0392833fb986a, vout 0
+		// adapted from btc:
+		// tx 691dd277dc0e90a462a3d652a1171686de49cf19067cd33c7df0392833fb986a, vout 0
 		// invalid public keys
 		{
 			name: "1 of 3 multisig with invalid pubkeys",
-			script: hexToBytes("51411c2200007353455857696b696c656" +
+			script: hexToBytes("5141042200007353455857696b696c656" +
 				"16b73204361626c6567617465204261636b75700a0a6" +
 				"361626c65676174652d3230313031323034313831312" +
-				"e377a0a0a446f41776e6c6f61642074686520666f6c6" +
+				"e377a0a0a446f41046e6c6f61642074686520666f6c6" +
 				"c6f77696e67207472616e73616374696f6e732077697" +
 				"468205361746f736869204e616b616d6f746f2773206" +
-				"46f776e6c6f61416420746f6f6c2077686963680a636" +
+				"46f776e6c6f61410420746f6f6c2077686963680a636" +
 				"16e20626520666f756e6420696e207472616e7361637" +
 				"4696f6e2036633533636439383731313965663739376" +
 				"435616463636453ae"),
@@ -285,17 +292,18 @@ func TestExtractPkScriptAddrs(t *testing.T) {
 			reqSigs: 1,
 			class:   MultiSigTy,
 		},
-		// from real tx: 691dd277dc0e90a462a3d652a1171686de49cf19067cd33c7df0392833fb986a, vout 44
+		// adapted from btc:
+		// tx 691dd277dc0e90a462a3d652a1171686de49cf19067cd33c7df0392833fb986a, vout 44
 		// invalid public keys
 		{
 			name: "1 of 3 multisig with invalid pubkeys 2",
-			script: hexToBytes("514134633365633235396337346461636" +
+			script: hexToBytes("514104633365633235396337346461636" +
 				"536666430383862343463656638630a6336366263313" +
 				"93936633862393461333831316233363536313866653" +
-				"16539623162354136636163636539393361333938386" +
+				"16539623162354104636163636539393361333938386" +
 				"134363966636336643664616266640a3236363363666" +
 				"13963663463303363363039633539336333653931666" +
-				"56465373032392131323364643432643235363339643" +
+				"56465373032392102323364643432643235363339643" +
 				"338613663663530616234636434340a00000053ae"),
 			addrs:   []dcrutil.Address{},
 			reqSigs: 1,
@@ -320,9 +328,8 @@ func TestExtractPkScriptAddrs(t *testing.T) {
 
 	t.Logf("Running %d tests.", len(tests))
 	for i, test := range tests {
-		class, addrs, reqSigs, err := ExtractPkScriptAddrs(
-			DefaultScriptVersion, test.script,
-			&chaincfg.MainNetParams)
+		class, addrs, reqSigs, err := ExtractPkScriptAddrs(scriptVersion,
+			test.script, mainNetParams)
 		if err != nil && !test.noparse {
 			t.Errorf("ExtractPkScriptAddrs #%d (%s): %v", i,
 				test.name, err)
@@ -351,122 +358,13 @@ func TestExtractPkScriptAddrs(t *testing.T) {
 	}
 }
 
-// TestCalcScriptInfo ensures the CalcScriptInfo provides the expected results
-// for various valid and invalid script pairs.
-func TestCalcScriptInfo(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		sigScript     string
-		pkScript      string
-		bip16         bool
-		scriptInfo    ScriptInfo
-		scriptInfoErr error
-	}{
-		{
-			// Invented scripts, the hashes do not match
-			// Truncated version of test below:
-			name: "pkscript doesn't parse",
-			sigScript: "1 81 DATA_8 2DUP EQUAL NOT VERIFY ABS " +
-				"SWAP ABS EQUAL",
-			pkScript: "HASH160 DATA_20 0xfe441065b6532231de2fac56" +
-				"3152205ec4f59c",
-			bip16:         true,
-			scriptInfoErr: scriptError(ErrMalformedPush, ""),
-		},
-		{
-			name: "sigScript doesn't parse",
-			// Truncated version of p2sh script below.
-			sigScript: "1 81 DATA_8 2DUP EQUAL NOT VERIFY ABS " +
-				"SWAP ABS",
-			pkScript: "HASH160 DATA_20 0xfe441065b6532231de2fac56" +
-				"3152205ec4f59c74 EQUAL",
-			bip16:         true,
-			scriptInfoErr: scriptError(ErrMalformedPush, ""),
-		},
-		{
-			// Invented scripts, the hashes do not match
-			name: "p2sh standard script",
-			sigScript: "1 81 DATA_25 DUP HASH160 DATA_20 0x010203" +
-				"0405060708090a0b0c0d0e0f1011121314 EQUALVERIFY " +
-				"CHECKSIG",
-			pkScript: "HASH160 DATA_20 0xfe441065b6532231de2fac56" +
-				"3152205ec4f59c74 EQUAL",
-			bip16: true,
-			scriptInfo: ScriptInfo{
-				PkScriptClass:  ScriptHashTy,
-				NumInputs:      3,
-				ExpectedInputs: 3, // nonstandard p2sh.
-				SigOps:         1,
-			},
-		},
-		{
-			// from 567a53d1ce19ce3d07711885168484439965501536d0d0294c5d46d46c10e53b
-			// from the blockchain.
-			name: "p2sh nonstandard script",
-			sigScript: "1 81 DATA_8 2DUP EQUAL NOT VERIFY ABS " +
-				"SWAP ABS EQUAL",
-			pkScript: "HASH160 DATA_20 0xfe441065b6532231de2fac56" +
-				"3152205ec4f59c74 EQUAL",
-			bip16: true,
-			scriptInfo: ScriptInfo{
-				PkScriptClass:  ScriptHashTy,
-				NumInputs:      3,
-				ExpectedInputs: -1, // nonstandard p2sh.
-				SigOps:         0,
-			},
-		},
-		{
-			// Script is invented, numbers all fake.
-			name: "multisig script",
-			// Extra 0 arg on the end for OP_CHECKMULTISIG bug.
-			sigScript: "1 1 1 0",
-			pkScript: "3 " +
-				"DATA_33 0x0102030405060708090a0b0c0d0e0f1011" +
-				"12131415161718191a1b1c1d1e1f2021 DATA_33 " +
-				"0x0102030405060708090a0b0c0d0e0f101112131415" +
-				"161718191a1b1c1d1e1f2021 DATA_33 0x010203040" +
-				"5060708090a0b0c0d0e0f101112131415161718191a1" +
-				"b1c1d1e1f2021 3 CHECKMULTISIG",
-			bip16: true,
-			scriptInfo: ScriptInfo{
-				PkScriptClass:  MultiSigTy,
-				NumInputs:      4,
-				ExpectedInputs: 3,
-				SigOps:         3,
-			},
-		},
-	}
-
-	for _, test := range tests {
-		sigScript := mustParseShortForm(test.sigScript)
-		pkScript := mustParseShortForm(test.pkScript)
-		si, err := CalcScriptInfo(sigScript, pkScript, test.bip16)
-		if e := tstCheckScriptError(err, test.scriptInfoErr); e != nil {
-			t.Errorf("scriptinfo test %q: %v", test.name, e)
-			continue
-		}
-		if err != nil {
-			continue
-		}
-
-		if *si != test.scriptInfo {
-			t.Errorf("%s: scriptinfo doesn't match expected. "+
-				"got: %q expected %q", test.name, *si,
-				test.scriptInfo)
-			continue
-		}
-	}
-}
-
 // bogusAddress implements the dcrutil.Address interface so the tests can ensure
 // unsupported address types are handled properly.
 type bogusAddress struct{}
 
-// EncodeAddress simply returns an empty string.  It exists to satisfy the
+// Address simply returns an empty string.  It exists to satisfy the
 // dcrutil.Address interface.
-func (b *bogusAddress) EncodeAddress() string {
+func (b *bogusAddress) Address() string {
 	return ""
 }
 
@@ -482,26 +380,10 @@ func (b *bogusAddress) Hash160() *[20]byte {
 	return nil
 }
 
-// IsForNet lies blatantly to satisfy the dcrutil.Address interface.
-func (b *bogusAddress) IsForNet(chainParams *chaincfg.Params) bool {
-	return true // why not?
-}
-
 // String simply returns an empty string.  It exists to satisfy the
 // dcrutil.Address interface.
 func (b *bogusAddress) String() string {
 	return ""
-}
-
-// DSA returns -1.
-func (b *bogusAddress) DSA(chainParams *chaincfg.Params) dcrec.SignatureType {
-	return -1
-}
-
-// Net returns the network for the bogus address.  It exists to satisfy the
-// dcrutil.Address interface.
-func (b *bogusAddress) Net() *chaincfg.Params {
-	return &chaincfg.RegNetParams
 }
 
 // TestPayToAddrScript ensures the PayToAddrScript function generates the
@@ -511,8 +393,7 @@ func TestPayToAddrScript(t *testing.T) {
 
 	// 1MirQ9bwyQcGVJPwKUgapu5ouK2E2Ey4gX
 	p2pkhMain, err := dcrutil.NewAddressPubKeyHash(hexToBytes("e34cce70c86"+
-		"373273efcc54ce7d2a491bb4a0e84"), &chaincfg.MainNetParams,
-		dcrec.STEcdsaSecp256k1)
+		"373273efcc54ce7d2a491bb4a0e84"), mainNetParams, dcrec.STEcdsaSecp256k1)
 	if err != nil {
 		t.Fatalf("Unable to create public key hash address: %v", err)
 	}
@@ -520,7 +401,7 @@ func TestPayToAddrScript(t *testing.T) {
 	// Taken from transaction:
 	// b0539a45de13b3e0403909b8bd1a555b8cbe45fd4e3f3fda76f3a5f52835c29d
 	p2shMain, _ := dcrutil.NewAddressScriptHashFromHash(hexToBytes("e8c30"+
-		"0c87986efa84c37c0519929019ef86eb5b4"), &chaincfg.MainNetParams)
+		"0c87986efa84c37c0519929019ef86eb5b4"), mainNetParams)
 	if err != nil {
 		t.Fatalf("Unable to create script hash address: %v", err)
 	}
@@ -528,14 +409,14 @@ func TestPayToAddrScript(t *testing.T) {
 	//  mainnet p2pk 13CG6SJ3yHUXo4Cr2RY4THLLJrNFuG3gUg
 	p2pkCompressedMain, err := dcrutil.NewAddressSecpPubKey(hexToBytes("02192d7"+
 		"4d0cb94344c9569c2e77901573d8d7903c3ebec3a957724895dca52c6b4"),
-		&chaincfg.MainNetParams)
+		mainNetParams)
 	if err != nil {
 		t.Fatalf("Unable to create pubkey address (compressed): %v",
 			err)
 	}
 	p2pkCompressed2Main, err := dcrutil.NewAddressSecpPubKey(hexToBytes("03b0b"+
 		"d634234abbb1ba1e986e884185c61cf43e001f9137f23c2c409273eb16e65"),
-		&chaincfg.MainNetParams)
+		mainNetParams)
 	if err != nil {
 		t.Fatalf("Unable to create pubkey address (compressed 2): %v",
 			err)
@@ -544,10 +425,6 @@ func TestPayToAddrScript(t *testing.T) {
 	p2pkUncompressedMain := newAddressPubKey(hexToBytes("0411db" +
 		"93e1dcdb8a016b49840f8c53bc1eb68a382e97b1482ecad7b148a6909a5cb2" +
 		"e0eaddfb84ccf9744464f82e160bfa9b8b64f9d4c03f999b8643f656b412a3"))
-
-	// Errors used in the tests below defined here for convenience and to
-	// keep the horizontal test size shorter.
-	errUnsupportedAddress := scriptError(ErrUnsupportedAddress, "")
 
 	tests := []struct {
 		in       dcrutil.Address
@@ -593,22 +470,22 @@ func TestPayToAddrScript(t *testing.T) {
 		},
 
 		// Supported address types with nil pointers.
-		{(*dcrutil.AddressPubKeyHash)(nil), "", errUnsupportedAddress},
-		{(*dcrutil.AddressScriptHash)(nil), "", errUnsupportedAddress},
-		{(*dcrutil.AddressSecpPubKey)(nil), "", errUnsupportedAddress},
-		{(*dcrutil.AddressEdwardsPubKey)(nil), "", errUnsupportedAddress},
-		{(*dcrutil.AddressSecSchnorrPubKey)(nil), "", errUnsupportedAddress},
+		{(*dcrutil.AddressPubKeyHash)(nil), "", ErrUnsupportedAddress},
+		{(*dcrutil.AddressScriptHash)(nil), "", ErrUnsupportedAddress},
+		{(*dcrutil.AddressSecpPubKey)(nil), "", ErrUnsupportedAddress},
+		{(*dcrutil.AddressEdwardsPubKey)(nil), "", ErrUnsupportedAddress},
+		{(*dcrutil.AddressSecSchnorrPubKey)(nil), "", ErrUnsupportedAddress},
 
 		// Unsupported address type.
-		{&bogusAddress{}, "", errUnsupportedAddress},
+		{&bogusAddress{}, "", ErrUnsupportedAddress},
 	}
 
 	t.Logf("Running %d tests", len(tests))
 	for i, test := range tests {
 		pkScript, err := PayToAddrScript(test.in)
-		if e := tstCheckScriptError(err, test.err); e != nil {
-			t.Errorf("PayToAddrScript #%d unexpected error - "+
-				"got %v, want %v", i, err, test.err)
+		if !errors.Is(err, test.err) {
+			t.Errorf("PayToAddrScript #%d unexpected error - got %v, want %v",
+				i, err, test.err)
 			continue
 		}
 
@@ -629,14 +506,14 @@ func TestMultiSigScript(t *testing.T) {
 	//  mainnet p2pk 13CG6SJ3yHUXo4Cr2RY4THLLJrNFuG3gUg
 	p2pkCompressedMain, err := dcrutil.NewAddressSecpPubKey(hexToBytes("02192d"+
 		"74d0cb94344c9569c2e77901573d8d7903c3ebec3a957724895dca52c6b4"),
-		&chaincfg.MainNetParams)
+		mainNetParams)
 	if err != nil {
 		t.Fatalf("Unable to create pubkey address (compressed): %v",
 			err)
 	}
 	p2pkCompressed2Main, err := dcrutil.NewAddressSecpPubKey(hexToBytes("03b0b"+
 		"d634234abbb1ba1e986e884185c61cf43e001f9137f23c2c409273eb16e65"),
-		&chaincfg.MainNetParams)
+		mainNetParams)
 	if err != nil {
 		t.Fatalf("Unable to create pubkey address (compressed 2): %v",
 			err)
@@ -684,7 +561,7 @@ func TestMultiSigScript(t *testing.T) {
 			},
 			3,
 			"",
-			scriptError(ErrTooManyRequiredSigs, ""),
+			ErrTooManyRequiredSigs,
 		},
 		{
 			// By default compressed pubkeys are used in Decred.
@@ -702,15 +579,16 @@ func TestMultiSigScript(t *testing.T) {
 			},
 			2,
 			"",
-			scriptError(ErrTooManyRequiredSigs, ""),
+			ErrTooManyRequiredSigs,
 		},
 	}
 
 	t.Logf("Running %d tests", len(tests))
 	for i, test := range tests {
 		script, err := MultiSigScript(test.keys, test.nrequired)
-		if e := tstCheckScriptError(err, test.err); e != nil {
-			t.Errorf("MultiSigScript #%d: %v", i, e)
+		if !errors.Is(err, test.err) {
+			t.Errorf("MultiSigScript #%d: unexpected error - got %v, want %v",
+				i, err, test.err)
 			continue
 		}
 
@@ -737,33 +615,29 @@ func TestCalcMultiSigStats(t *testing.T) {
 			name: "short script",
 			script: "0x046708afdb0fe5548271967f1a67130b7105cd6a828" +
 				"e03909a67962e0ea1f61d",
-			err: scriptError(ErrMalformedPush, ""),
+			err: ErrNotMultisigScript,
 		},
 		{
 			name: "stack underflow",
 			script: "RETURN DATA_41 0x046708afdb0fe5548271967f1a" +
 				"67130b7105cd6a828e03909a67962e0ea1f61deb649f6" +
 				"bc3f4cef308",
-			err: scriptError(ErrNotMultisigScript, ""),
+			err: ErrNotMultisigScript,
 		},
 		{
 			name: "multisig script",
-			script: "0 DATA_72 0x30450220106a3e4ef0b51b764a2887226" +
-				"2ffef55846514dacbdcbbdd652c849d395b4384022100" +
-				"e03ae554c3cbb40600d31dd46fc33f25e47bf8525b1fe" +
-				"07282e3b6ecb5f3bb2801 CODESEPARATOR 1 DATA_33 " +
-				"0x0232abdc893e7f0631364d7fd01cb33d24da45329a0" +
+			script: "1 DATA_33 0x0232abdc893e7f0631364d7fd01cb33d24da45329a0" +
 				"0357b3a7886211ab414d55a 1 CHECKMULTISIG",
 			err: nil,
 		},
 	}
 
-	for i, test := range tests {
+	for _, test := range tests {
 		script := mustParseShortForm(test.script)
 		_, _, err := CalcMultiSigStats(script)
-		if e := tstCheckScriptError(err, test.err); e != nil {
-			t.Errorf("CalcMultiSigStats #%d (%s): %v", i, test.name,
-				e)
+		if !errors.Is(err, test.err) {
+			t.Errorf("%s: unexpected error - got %v, want %v", test.name, err,
+				test.err)
 			continue
 		}
 	}
@@ -774,9 +648,10 @@ func TestCalcMultiSigStats(t *testing.T) {
 // inside a function scope since this spans both the standard tests and the
 // consensus tests (pay-to-script-hash is part of consensus).
 var scriptClassTests = []struct {
-	name   string
-	script string
-	class  ScriptClass
+	name     string
+	script   string
+	class    ScriptClass
+	subClass ScriptClass
 }{
 	{
 		name: "Pay Pubkey",
@@ -807,6 +682,34 @@ var scriptClassTests = []struct {
 		script: "HASH160 DATA_20 0x433ec2ac1ffa1b7b7d027f564529c57197f" +
 			"9ae88 EQUAL",
 		class: ScriptHashTy,
+	},
+	{
+		name: "Stake Submission P2SH",
+		script: "SSTX HASH160 DATA_20 0x433ec2ac1ffa1b7b7d027f564529" +
+			"c57197f9ae88 EQUAL",
+		class:    StakeSubmissionTy,
+		subClass: ScriptHashTy,
+	},
+	{
+		name: "Stake Submission Generation P2SH",
+		script: "SSGEN HASH160 DATA_20 0x433ec2ac1ffa1b7b7d027f564529" +
+			"c57197f9ae88 EQUAL",
+		class:    StakeGenTy,
+		subClass: ScriptHashTy,
+	},
+	{
+		name: "Stake Submission Revocation P2SH",
+		script: "SSRTX HASH160 DATA_20 0x433ec2ac1ffa1b7b7d027f564529" +
+			"c57197f9ae88 EQUAL",
+		class:    StakeRevocationTy,
+		subClass: ScriptHashTy,
+	},
+	{
+		name: "Stake Submission Change P2SH",
+		script: "SSTXCHANGE HASH160 DATA_20 0x433ec2ac1ffa1b7b7d027f5" +
+			"64529c57197f9ae88 EQUAL",
+		class:    StakeSubChangeTy,
+		subClass: ScriptHashTy,
 	},
 
 	{
@@ -945,9 +848,10 @@ var scriptClassTests = []struct {
 func TestScriptClass(t *testing.T) {
 	t.Parallel()
 
+	const scriptVersion = 0
 	for _, test := range scriptClassTests {
 		script := mustParseShortForm(test.script)
-		class := GetScriptClass(DefaultScriptVersion, script)
+		class := GetScriptClass(scriptVersion, script)
 		if class != test.class {
 			t.Errorf("%s: expected %s got %s (script %x)", test.name,
 				test.class, class, script)
@@ -1014,6 +918,7 @@ func TestStringifyClass(t *testing.T) {
 
 // TestGenerateProvablyPruneableOut tests whether GenerateProvablyPruneableOut returns a valid script.
 func TestGenerateProvablyPruneableOut(t *testing.T) {
+	const scriptVersion = 0
 	tests := []struct {
 		name     string
 		data     []byte
@@ -1083,18 +988,17 @@ func TestGenerateProvablyPruneableOut(t *testing.T) {
 				"4a4b4c4d4e4f202122232425262728292a2b2c2d2e2f303132333435363738393" +
 				"a3b3c3d3e3f3f"),
 			expected: nil,
-			err:      scriptError(ErrTooMuchNullData, ""),
+			err:      ErrTooMuchNullData,
 			class:    NonStandardTy,
 		},
 	}
 
 	for i, test := range tests {
 		script, err := GenerateProvablyPruneableOut(test.data)
-		if e := tstCheckScriptError(err, test.err); e != nil {
-			t.Errorf("GenerateProvablyPruneableOut: #%d (%s) %v: ",
-				i, test.name, e)
+		if !errors.Is(err, test.err) {
+			t.Errorf("%s: unexpected error - got %v, want %v", test.name, err,
+				test.err)
 			continue
-
 		}
 
 		// Check that the expected result was returned.
@@ -1106,12 +1010,305 @@ func TestGenerateProvablyPruneableOut(t *testing.T) {
 		}
 
 		// Check that the script has the correct type.
-		scriptType := GetScriptClass(DefaultScriptVersion, script)
+		scriptType := GetScriptClass(scriptVersion, script)
 		if scriptType != test.class {
 			t.Errorf("GetScriptClass: #%d (%s) wrong result -- "+
 				"got: %v, want: %v", i, test.name, scriptType,
 				test.class)
 			continue
+		}
+	}
+}
+
+// TestGenerateSStxAddrPush ensures an expected OP_RETURN push is generated.
+func TestGenerateSStxAddrPush(t *testing.T) {
+	testNetParams := chaincfg.TestNet3Params()
+	var tests = []struct {
+		addrStr  string
+		net      dcrutil.AddressParams
+		amount   dcrutil.Amount
+		limits   uint16
+		expected []byte
+	}{
+		{
+			"Dcur2mcGjmENx4DhNqDctW5wJCVyT3Qeqkx",
+			mainNetParams,
+			1000,
+			10,
+			hexToBytes("6a1ef5916158e3e2c4551c1796708db8367207ed1" +
+				"3bbe8030000000000800a00"),
+		},
+		{
+			"TscB7V5RuR1oXpA364DFEsNDuAs8Rk6BHJE",
+			testNetParams,
+			543543,
+			256,
+			hexToBytes("6a1e7a5c4cca76f2e0b36db4763daacbd6cbb6ee6" +
+				"e7b374b0800000000000001"),
+		},
+	}
+	for _, test := range tests {
+		addr, err := dcrutil.DecodeAddress(test.addrStr, test.net)
+		if err != nil {
+			t.Errorf("DecodeAddress failed: %v", err)
+			continue
+		}
+		s, err := GenerateSStxAddrPush(addr, test.amount, test.limits)
+		if err != nil {
+			t.Errorf("GenerateSStxAddrPush failed: %v", err)
+			continue
+		}
+		if !bytes.Equal(s, test.expected) {
+			t.Errorf("GenerateSStxAddrPush: unexpected script:\n "+
+				"got %x\nwant %x", s, test.expected)
+		}
+	}
+}
+
+// TestGenerateSSGenBlockRef ensures an expected OP_RETURN push is generated.
+func TestGenerateSSGenBlockRef(t *testing.T) {
+	var tests = []struct {
+		blockHash string
+		height    uint32
+		expected  []byte
+	}{
+		{
+			"0000000000004740ad140c86753f9295e09f9cc81b1bb75d7f5552aeeedb7012",
+			1000,
+			hexToBytes("6a241270dbeeae52557f5db71b1bc89c9fe095923" +
+				"f75860c14ad4047000000000000e8030000"),
+		},
+		{
+			"000000000000000033eafc268a67c8d1f02343d7a96cf3fe2a4915ef779b52f9",
+			290000,
+			hexToBytes("6a24f9529b77ef15492afef36ca9d74323f0d1c86" +
+				"78a26fcea330000000000000000d06c0400"),
+		},
+	}
+	for _, test := range tests {
+		h, err := chainhash.NewHashFromStr(test.blockHash)
+		if err != nil {
+			t.Errorf("NewHashFromStr failed: %v", err)
+			continue
+		}
+		s, err := GenerateSSGenBlockRef(*h, test.height)
+		if err != nil {
+			t.Errorf("GenerateSSGenBlockRef failed: %v", err)
+			continue
+		}
+		if !bytes.Equal(s, test.expected) {
+			t.Errorf("GenerateSSGenBlockRef: unexpected script:\n"+
+				" got %x\nwant %x", s, test.expected)
+		}
+	}
+}
+
+// TestGenerateSSGenVotes ensures an expected OP_RETURN push is generated.
+func TestGenerateSSGenVotes(t *testing.T) {
+	var tests = []struct {
+		votebits uint16
+		expected []byte
+	}{
+		{65535, hexToBytes("6a02ffff")},
+		{256, hexToBytes("6a020001")},
+		{127, hexToBytes("6a027f00")},
+		{0, hexToBytes("6a020000")},
+	}
+	for _, test := range tests {
+		s, err := GenerateSSGenVotes(test.votebits)
+		if err != nil {
+			t.Errorf("GenerateSSGenVotes failed: %v", err)
+			continue
+		}
+		if !bytes.Equal(s, test.expected) {
+			t.Errorf("GenerateSSGenVotes: unexpected script:\n "+
+				"got %x\nwant %x", s, test.expected)
+		}
+	}
+}
+
+// mustExpectedAtomicSwapData is a convenience function that converts the passed
+// parameters into an expected atomic swap data pushes structure and will panic
+// if there is an error.  This is only provided for the hard-coded constants so
+// errors in the source code can be detected. It will only (and must only) be
+// called with hard-coded values.
+func mustExpectedAtomicSwapData(recipientHash, refundHash, secretHash string, secretSize, lockTime int64) *AtomicSwapDataPushes {
+	result := &AtomicSwapDataPushes{
+		SecretSize: secretSize,
+		LockTime:   lockTime,
+	}
+	copy(result.RecipientHash160[:], hexToBytes(recipientHash))
+	copy(result.RefundHash160[:], hexToBytes(refundHash))
+	copy(result.SecretHash[:], hexToBytes(secretHash))
+	return result
+}
+
+// TestExtractAtomicSwapDataPushes ensures atomic swap scripts are recognized
+// properly and the correct information is extracted from them.
+func TestExtractAtomicSwapDataPushes(t *testing.T) {
+	// Define some values shared in the tests for convenience.
+	secret := "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+	recipient := "0000000000000000000000000000000000000001"
+	refund := "0000000000000000000000000000000000000002"
+
+	tests := []struct {
+		name          string                // test description
+		scriptVersion uint16                // version of script to analyze
+		script        string                // script to analyze
+		data          *AtomicSwapDataPushes // expected data pushes
+		err           error                 // expected error
+	}{{
+		name: "normal valid atomic swap",
+		script: fmt.Sprintf("IF SIZE 32 EQUALVERIFY SHA256 DATA_32 "+
+			"0x%s EQUALVERIFY DUP HASH160 DATA_20 0x%s ELSE 300000 "+
+			"CHECKLOCKTIMEVERIFY DROP DUP HASH160 DATA_20 0x%s ENDIF "+
+			"EQUALVERIFY CHECKSIG", secret, recipient, refund),
+		scriptVersion: 0,
+		data: mustExpectedAtomicSwapData(recipient, refund, secret, 32,
+			300000),
+		err: nil,
+	}, {
+		name: "atomic swap with mismatched smallint secret size",
+		script: fmt.Sprintf("IF SIZE 16 EQUALVERIFY SHA256 DATA_32 "+
+			"0x%s EQUALVERIFY DUP HASH160 DATA_20 0x%s ELSE 300000 "+
+			"CHECKLOCKTIMEVERIFY DROP DUP HASH160 DATA_20 0x%s ENDIF "+
+			"EQUALVERIFY CHECKSIG", secret, recipient, refund),
+		scriptVersion: 0,
+		data: mustExpectedAtomicSwapData(recipient, refund, secret, 16,
+			300000),
+		err: nil,
+	}, {
+		name: "atomic swap with smallint locktime",
+		script: fmt.Sprintf("IF SIZE 32 EQUALVERIFY SHA256 DATA_32 "+
+			"0x%s EQUALVERIFY DUP HASH160 DATA_20 0x%s ELSE 10 "+
+			"CHECKLOCKTIMEVERIFY DROP DUP HASH160 DATA_20 0x%s ENDIF "+
+			"EQUALVERIFY CHECKSIG", secret, recipient, refund),
+		scriptVersion: 0,
+		data: mustExpectedAtomicSwapData(recipient, refund, secret, 32,
+			10),
+		err: nil,
+	}, {
+		name: "almost valid, but NOP for secret size",
+		script: fmt.Sprintf("IF SIZE NOP EQUALVERIFY SHA256 DATA_32 "+
+			"0x%s EQUALVERIFY DUP HASH160 DATA_20 0x%s ELSE 300000 "+
+			"CHECKLOCKTIMEVERIFY DROP DUP HASH160 DATA_20 0x%s ENDIF "+
+			"EQUALVERIFY CHECKSIG", secret, recipient, refund),
+		scriptVersion: 0,
+		data:          nil,
+		err:           nil,
+	}, {
+		name: "almost valid, but NOP for locktime",
+		script: fmt.Sprintf("IF SIZE 32 EQUALVERIFY SHA256 DATA_32 "+
+			"0x%s EQUALVERIFY DUP HASH160 DATA_20 0x%s ELSE NOP "+
+			"CHECKLOCKTIMEVERIFY DROP DUP HASH160 DATA_20 0x%s ENDIF "+
+			"EQUALVERIFY CHECKSIG", secret, recipient, refund),
+		scriptVersion: 0,
+		data:          nil,
+		err:           nil,
+	}, {
+		name: "almost valid, but wrong sha256 secret size",
+		script: fmt.Sprintf("IF SIZE 32 EQUALVERIFY SHA256 DATA_31 "+
+			"0x%s EQUALVERIFY DUP HASH160 DATA_20 0x%s ELSE 300000 "+
+			"CHECKLOCKTIMEVERIFY DROP DUP HASH160 DATA_20 0x%s ENDIF "+
+			"EQUALVERIFY CHECKSIG", secret[:len(secret)-2], recipient, refund),
+		scriptVersion: 0,
+		data:          nil,
+		err:           nil,
+	}, {
+		name: "almost valid, but wrong recipient hash size",
+		script: fmt.Sprintf("IF SIZE 32 EQUALVERIFY SHA256 DATA_32 "+
+			"0x%s EQUALVERIFY DUP HASH160 DATA_19 0x%s ELSE 300000 "+
+			"CHECKLOCKTIMEVERIFY DROP DUP HASH160 DATA_20 0x%s ENDIF "+
+			"EQUALVERIFY CHECKSIG", secret, recipient[:len(recipient)-2],
+			refund),
+		scriptVersion: 0,
+		data:          nil,
+		err:           nil,
+	}, {
+		name: "almost valid, but wrong refund hash size",
+		script: fmt.Sprintf("IF SIZE 32 EQUALVERIFY SHA256 DATA_32 "+
+			"0x%s EQUALVERIFY DUP HASH160 DATA_20 0x%s ELSE 300000 "+
+			"CHECKLOCKTIMEVERIFY DROP DUP HASH160 DATA_19 0x%s ENDIF "+
+			"EQUALVERIFY CHECKSIG", secret, recipient, refund[:len(refund)-2]),
+		scriptVersion: 0,
+		data:          nil,
+		err:           nil,
+	}, {
+		name: "almost valid, but missing final CHECKSIG",
+		script: fmt.Sprintf("IF SIZE 32 EQUALVERIFY SHA256 DATA_32 "+
+			"0x%s EQUALVERIFY DUP HASH160 DATA_20 0x%s ELSE 300000 "+
+			"CHECKLOCKTIMEVERIFY DROP DUP HASH160 DATA_20 0x%s ENDIF "+
+			"EQUALVERIFY", secret, recipient, refund),
+		scriptVersion: 0,
+		data:          nil,
+		err:           nil,
+	}, {
+		name: "almost valid, but additional opcode at end",
+		script: fmt.Sprintf("IF SIZE 32 EQUALVERIFY SHA256 DATA_32 "+
+			"0x%s EQUALVERIFY DUP HASH160 DATA_20 0x%s ELSE 300000 "+
+			"CHECKLOCKTIMEVERIFY DROP DUP HASH160 DATA_20 0x%s ENDIF "+
+			"EQUALVERIFY CHECKSIG NOP", secret, recipient, refund),
+		scriptVersion: 0,
+		data:          nil,
+		err:           nil,
+	}, {
+		name: "valid atomic swap for v0 script, but unsupported version",
+		script: fmt.Sprintf("IF SIZE 32 EQUALVERIFY SHA256 DATA_32 "+
+			"0x%s EQUALVERIFY DUP HASH160 DATA_20 0x%s ELSE 300000 "+
+			"CHECKLOCKTIMEVERIFY DROP DUP HASH160 DATA_20 0x%s ENDIF "+
+			"EQUALVERIFY CHECKSIG", secret, recipient, refund),
+		scriptVersion: 65535,
+		data:          nil,
+		err:           ErrUnsupportedScriptVersion,
+	}}
+
+	for _, test := range tests {
+		script := mustParseShortForm(test.script)
+
+		// Attempt to extract the atomic swap data from the script and ensure
+		// the error is as expected.
+		data, err := ExtractAtomicSwapDataPushes(test.scriptVersion, script)
+		if !errors.Is(err, test.err) {
+			t.Fatalf("%q: unexpected err -- got %v, want nil", test.name, err)
+		}
+		if test.err != nil {
+			continue
+		}
+
+		// Ensure there is either extract data or not as expected.
+		switch {
+		case test.data == nil && data != nil:
+			t.Fatalf("%q: unexpected extracted data", test.name)
+
+		case test.data != nil && data == nil:
+			t.Fatalf("%q: failed to extract expected data", test.name)
+
+		case data == nil:
+			continue
+		}
+
+		// Ensure the individual fields of the extracted data is accurate.  The
+		// two structs could be directly compared, but testing them individually
+		// allows nicer error reporting in the case of failure.
+		if data.RecipientHash160 != test.data.RecipientHash160 {
+			t.Fatalf("%q: unexpected recipient hash -- got %x, want %x",
+				test.name, data.RecipientHash160, test.data.RecipientHash160)
+		}
+		if data.RefundHash160 != test.data.RefundHash160 {
+			t.Fatalf("%q: unexpected refund hash -- got %x, want %x", test.name,
+				data.RefundHash160, test.data.RefundHash160)
+		}
+		if data.SecretHash != test.data.SecretHash {
+			t.Fatalf("%q: unexpected secret hash -- got %x, want %x", test.name,
+				data.SecretHash, test.data.SecretHash)
+		}
+		if data.SecretSize != test.data.SecretSize {
+			t.Fatalf("%q: unexpected secret size -- got %d, want %d", test.name,
+				data.SecretSize, test.data.SecretSize)
+		}
+		if data.LockTime != test.data.LockTime {
+			t.Fatalf("%q: unexpected locktime -- got %d, want %d", test.name,
+				data.LockTime, test.data.LockTime)
 		}
 	}
 }

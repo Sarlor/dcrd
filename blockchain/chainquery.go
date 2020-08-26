@@ -77,9 +77,12 @@ type ChainTipInfo struct {
 // known chain tips in the block index.
 func (b *BlockChain) ChainTips() []ChainTipInfo {
 	b.index.RLock()
-	var chainTips []*blockNode
-	for _, nodes := range b.index.chainTips {
-		chainTips = append(chainTips, nodes...)
+	chainTips := make([]*blockNode, 0, b.index.totalTips)
+	for _, entry := range b.index.chainTips {
+		chainTips = append(chainTips, entry.tip)
+		if len(entry.otherTips) > 0 {
+			chainTips = append(chainTips, entry.otherTips...)
+		}
 	}
 	b.index.RUnlock()
 
@@ -121,7 +124,7 @@ func (b *BlockChain) ChainTips() []ChainTipInfo {
 			result.Status = "invalid"
 		} else if !tipStatus.HaveData() {
 			result.Status = "headers-only"
-		} else if tipStatus.KnownValid() {
+		} else if tipStatus.HasValidated() {
 			result.Status = "valid-fork"
 		} else {
 			result.Status = "valid-headers"

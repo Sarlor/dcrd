@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -19,11 +19,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/btcsuite/goleveldb/leveldb"
-	ldberrors "github.com/btcsuite/goleveldb/leveldb/errors"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/database/v2"
+	"github.com/decred/dcrd/dcrutil/v3"
 	"github.com/decred/dcrd/wire"
+	"github.com/syndtr/goleveldb/leveldb"
+	ldberrors "github.com/syndtr/goleveldb/leveldb/errors"
 )
 
 var (
@@ -84,7 +84,7 @@ func loadBlocks(t *testing.T, dataFile string, network wire.CurrencyNet) ([]*dcr
 }
 
 // checkDbError ensures the passed error is a database.Error with an error code
-// that matches the passed  error code.
+// that matches the passed error code.
 func checkDbError(t *testing.T, testName string, gotErr error, wantErrCode database.ErrorCode) bool {
 	dbErr, ok := gotErr.(database.Error)
 	if !ok {
@@ -142,8 +142,8 @@ func TestConvertErr(t *testing.T) {
 func TestCornerCases(t *testing.T) {
 	t.Parallel()
 
-	// Create a file at the datapase path to force the open below to fail.
-	dbPath := filepath.Join(os.TempDir(), "ffldb-errors")
+	// Create a file at the database path to force the open below to fail.
+	dbPath := filepath.Join(os.TempDir(), "ffldb-errors-v2")
 	_ = os.RemoveAll(dbPath)
 	fi, err := os.Create(dbPath)
 	if err != nil {
@@ -195,7 +195,7 @@ func TestCornerCases(t *testing.T) {
 	ldb := idb.(*db).cache.ldb
 	ldb.Close()
 
-	// Ensure initilization errors in the underlying database work as
+	// Ensure initialization errors in the underlying database work as
 	// expected.
 	testName = "initDB: reinitialization"
 	wantErrCode = database.ErrDbNotOpen
@@ -580,7 +580,7 @@ func testCorruption(tc *testContext) bool {
 // correctly.
 func TestFailureScenarios(t *testing.T) {
 	// Create a new database to run tests against.
-	dbPath := filepath.Join(os.TempDir(), "ffldb-failurescenarios")
+	dbPath := filepath.Join(os.TempDir(), "ffldb-failurescenarios-v2")
 	_ = os.RemoveAll(dbPath)
 	idb, err := database.Create(dbType, dbPath, blockDataNet)
 	if err != nil {
@@ -620,9 +620,9 @@ func TestFailureScenarios(t *testing.T) {
 		// context.
 		maxSize := int64(-1)
 		if maxFileSize, ok := tc.maxFileSizes[fileNum]; ok {
-			maxSize = int64(maxFileSize)
+			maxSize = maxFileSize
 		}
-		file := &mockFile{maxSize: int64(maxSize)}
+		file := &mockFile{maxSize: maxSize}
 		tc.files[fileNum] = &lockableFile{file: file}
 		return file, nil
 	}

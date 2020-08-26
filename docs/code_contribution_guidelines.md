@@ -7,6 +7,7 @@
 4.2. [Testing](#Testing)<br />
 4.3. [Code Documentation and Commenting](#CodeDocumentation)<br />
 4.4. [Model Git Commit Messages](#ModelGitCommitMessages)<br />
+4.5. [Handling Module Breaking Changes](#HandlingModuleBreakingChanges)<br />
 5. [Code Approval Process](#CodeApproval)<br />
 5.1 [Code Review](#CodeReview)<br />
 5.2 [Rework Code (if needed)](#CodeRework)<br />
@@ -69,10 +70,10 @@ security and performance implications.
 
 ### 3. Required Reading
 
-- [Effective Go](http://golang.org/doc/effective_go.html) - The entire dcrd
+- [Effective Go](https://golang.org/doc/effective_go.html) - The entire dcrd
   suite follows the guidelines in this document.  For your code to be accepted,
   it must follow the guidelines therein.
-- [Original Satoshi Whitepaper](https://bitcoin.org/bitcoin.pdf) - This is the
+- [Original Satoshi Whitepaper](https://decred.org/research/nakamoto2008.pdf) - This is the
   white paper that started it all.  Having a solid foundation to build on will
   make the code much more comprehensible.
 
@@ -125,7 +126,7 @@ code works correctly when it is fed correct data as well as incorrect data
 
 Go provides an excellent test framework that makes writing test code and
 checking coverage statistics straight forward.  For more information about the
-test coverage tools, see the [Golang cover blog post](http://blog.golang.org/cover).
+test coverage tools, see the [Golang cover blog post](https://blog.golang.org/cover).
 
 A simple way to check the coverage of a package and all its functions is to call
 ```
@@ -147,9 +148,9 @@ A quick summary of test practices follows:
 - At a minimum every function must be commented with its intended purpose and
   any assumptions that it makes
   - Function comments must always begin with the name of the function per
-    [Effective Go](http://golang.org/doc/effective_go.html).
+    [Effective Go](https://golang.org/doc/effective_go.html).
   - Function comments should be complete sentences since they allow a wide
-    variety of automated presentations such as [godoc.org](https://godoc.org).
+    variety of automated presentations such as [pkg.go.dev](https://pkg.go.dev).
   - The general rule of thumb is to look at it as if you were completely
     unfamiliar with the code and ask yourself, would this give me enough
     information to understand what this function does and how I'd probably want
@@ -215,8 +216,12 @@ comment can make.
 ### 4.4 Model Git Commit Messages
 
 This project prefers to keep a clean commit history with well-formed commit
-messages.  This section illustrates a model commit message and provides a bit
-of background for it.  This content was originally created by Tim Pope and made
+messages. Commit messages should usually be multi-line, fully descriptive, and
+self-contained. Further, since this project deliberately avoids relying on
+GitHub to store information permanently, good commit messages are required.
+
+This section illustrates a model commit message and provides a bit of
+background for it.  This content was originally created by Tim Pope and made
 available on his website, however that website is no longer active, so it is
 being provided here.
 
@@ -259,7 +264,7 @@ Here is how the right prefix for a commit is chosen.
 Here are some of the reasons why wrapping your commit messages to 72 columns is
 a good thing.
 
-- git log doesn’t do any special special wrapping of the commit messages. With
+- git log doesn’t do any special wrapping of the commit messages. With
   the default pager of less -S, this means your paragraphs flow far off the edge
   of the screen, making them difficult to read. On an 80 column terminal, if we
   subtract 4 columns for the indent on the left and 4 more for symmetry on the
@@ -268,6 +273,38 @@ a good thing.
   using the messages for the message body.  Good email netiquette dictates we
   wrap our plain text emails such that there’s room for a few levels of nested
   reply indicators without overflow in an 80 column terminal.
+
+Since this repository will not necessarily be hosted permanently by GitHub,
+git commit messages should never link to other issues or PRs. They should only
+ever describe their own content.
+
+However, PR descriptions in GitHub can *and should* be edited to reference
+other issues, PRs, or discussion threads.
+
+<a name="HandlingModuleBreakingChanges" />
+
+### 4.5 Handling Module Breaking Changes
+
+Pull requests that introduce breaking changes to modules must ensure dependent 
+modules on the change are updated to referrence newly bumped module versions.  
+The purpose of this is to improve the release process by handling version 
+updates with the pull request that introduces it instead of waiting until 
+release.
+
+The request submitter should ensure the following steps are covered whenever a 
+new breaking change to a module's API is introduced:
+
+- Bump the major version in the `go.mod` of the affected module if not already 
+  done since the last release tag. Note that v1 modules are stablilized even 
+  without a release, breaking changes to such modules will require a major 
+  version bump as well.
+- Add a replacement to the `go.mod` in the main module if not already done since 
+  the last release tag.
+- Update all imports in the repo to use the new major version as necessary.
+  - Make necessary modifications to allow all other modules to use the new 
+  version in the same commit.
+- Repeat the process for any other modules the require a new major as a result 
+  of consuming the new major(s).
 
 <a name="CodeApproval" />
 

@@ -21,7 +21,7 @@ var (
 		ipNet("192.168.0.0", 16, 32),
 	}
 
-	// rfc2544Net specifies the the IPv4 block as defined by RFC2544
+	// rfc2544Net specifies the IPv4 block as defined by RFC2544
 	// (198.18.0.0/15)
 	rfc2544Net = ipNet("198.18.0.0", 15, 32)
 
@@ -78,7 +78,7 @@ var (
 	// byte number. It then stores the first 6 bytes of the address as
 	// 0xfd, 0x87, 0xd8, 0x7e, 0xeb, 0x43.
 	//
-	// This is the same range used by OnionCat, which is part part of the
+	// This is the same range used by OnionCat, which is part of the
 	// RFC4193 unique local IPv6 range.
 	//
 	// In summary the format is:
@@ -116,6 +116,33 @@ func isLocal(na *wire.NetAddress) bool {
 // IPv6 range.
 func isOnionCatTor(na *wire.NetAddress) bool {
 	return onionCatNet.Contains(na.IP)
+}
+
+// NetworkAddress type is used to classify a network address.
+type NetworkAddress int
+
+const (
+	LocalAddress NetworkAddress = iota
+	IPv4Address
+	IPv6Address
+	OnionAddress
+)
+
+// getNetwork returns the network address type of the provided network address.
+func getNetwork(na *wire.NetAddress) NetworkAddress {
+	switch {
+	case isLocal(na):
+		return LocalAddress
+
+	case isIPv4(na):
+		return IPv4Address
+
+	case isOnionCatTor(na):
+		return OnionAddress
+
+	default:
+		return IPv6Address
+	}
 }
 
 // isRFC1918 returns whether or not the passed address is part of the IPv4
@@ -254,7 +281,6 @@ func GroupKey(na *wire.NetAddress) string {
 	if isRFC3964(na) {
 		ip := na.IP[2:6]
 		return ip.Mask(net.CIDRMask(16, 32)).String()
-
 	}
 	if isRFC4380(na) {
 		// teredo tunnels have the last 4 bytes as the v4 address XOR

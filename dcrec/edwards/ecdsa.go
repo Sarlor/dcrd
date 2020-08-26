@@ -38,7 +38,7 @@ var (
 // GenerateKey generates a key using a random number generator, returning
 // the private scalar and the corresponding public key points from a
 // random secret.
-func GenerateKey(curve *TwistedEdwardsCurve, rand io.Reader) (priv []byte, x, y *big.Int, err error) {
+func GenerateKey(rand io.Reader) (priv []byte, x, y *big.Int, err error) {
 	var pub *[PubKeyBytesLen]byte
 	var privArray *[PrivKeyBytesLen]byte
 	pub, privArray, err = ed25519.GenerateKey(rand)
@@ -47,7 +47,7 @@ func GenerateKey(curve *TwistedEdwardsCurve, rand io.Reader) (priv []byte, x, y 
 	}
 	priv = privArray[:]
 
-	x, y, err = curve.EncodedBytesToBigIntPoint(pub)
+	x, y, err = Edwards().encodedBytesToBigIntPoint(pub)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -75,28 +75,40 @@ func SignFromSecretNoReader(priv *PrivateKey, hash []byte) (r, s *big.Int, err e
 	//   sig[32:64] S, scalar multiplication/addition results = (ab+c) mod l
 	//     encoded also as little endian
 	rBytes := copyBytes(sig[0:32])
-	r = EncodedBytesToBigInt(rBytes)
+	r = encodedBytesToBigInt(rBytes)
 	sBytes := copyBytes(sig[32:64])
-	s = EncodedBytesToBigInt(sBytes)
+	s = encodedBytesToBigInt(sBytes)
 
 	return
 }
 
-// nonceRFC6979 is a local instatiation of deterministic nonce generation
+// zeroBigInt zeroes the underlying memory used by the passed big integer.  The
+// big integer must not be used after calling this as it changes the internal
+// state out from under it which can lead to unpredictable results.
+func zeroBigInt(v *big.Int) {
+	words := v.Bits()
+	for i := 0; i < len(words); i++ {
+		words[i] = 0
+	}
+	v.SetInt64(0)
+}
+
+// nonceRFC6979 is a local instantiation of deterministic nonce generation
 // by the standards of RFC6979.
-func nonceRFC6979(curve *TwistedEdwardsCurve, privkey []byte, hash []byte, extra []byte, version []byte) []byte {
+func nonceRFC6979(privkey []byte, hash []byte, extra []byte, version []byte) []byte {
 	pkD := new(big.Int).SetBytes(privkey)
-	defer pkD.SetInt64(0)
-	bigK := NonceRFC6979(curve, pkD, hash, extra, version)
-	defer bigK.SetInt64(0)
-	k := BigIntToEncodedBytesNoReverse(bigK)
+	defer zeroBigInt(pkD)
+	bigK := NonceRFC6979(pkD, hash, extra, version)
+	defer zeroBigInt(bigK)
+	k := bigIntToEncodedBytesNoReverse(bigK)
 	return k[:]
 }
 
 // NonceRFC6979 generates an ECDSA nonce (`k`) deterministically according to
 // RFC 6979. It takes a 32-byte hash as an input and returns 32-byte nonce to
 // be used in ECDSA algorithm.
-func NonceRFC6979(curve *TwistedEdwardsCurve, privkey *big.Int, hash []byte, extra []byte, version []byte) *big.Int {
+func NonceRFC6979(privkey *big.Int, hash []byte, extra []byte, version []byte) *big.Int {
+	curve := Edwards()
 	q := curve.Params().N
 	x := privkey
 	alg := sha256.New
@@ -104,7 +116,7 @@ func NonceRFC6979(curve *TwistedEdwardsCurve, privkey *big.Int, hash []byte, ext
 	qlen := q.BitLen()
 	holen := alg().Size()
 	rolen := (qlen + 7) >> 3
-	bx := append(int2octets(x, rolen), bits2octets(hash, curve, rolen)...)
+	bx := append(int2octets(x, rolen), bits2octets(hash, rolen)...)
 	if len(extra) == 32 {
 		bx = append(bx, extra...)
 	}
@@ -206,7 +218,8 @@ func int2octets(v *big.Int, rolen int) []byte {
 }
 
 // https://tools.ietf.org/html/rfc6979#section-2.3.4
-func bits2octets(in []byte, curve *TwistedEdwardsCurve, rolen int) []byte {
+func bits2octets(in []byte, rolen int) []byte {
+	curve := Edwards()
 	z1 := hashToInt(in, curve)
 	z2 := new(big.Int).Sub(z1, curve.Params().N)
 	if z2.Sign() < 0 {
@@ -219,7 +232,7 @@ func bits2octets(in []byte, curve *TwistedEdwardsCurve, rolen int) []byte {
 // It uses RFC6979 to generate a deterministic nonce. Considered experimental.
 // r = kG, where k is the RFC6979 nonce
 // s = r + hash512(k || A || M) * a
-func SignFromScalar(curve *TwistedEdwardsCurve, priv *PrivateKey, nonce []byte, hash []byte) (r, s *big.Int, err error) {
+func SignFromScalar(priv *PrivateKey, nonce []byte, hash []byte) (r, s *big.Int, err error) {
 	publicKey := new([PubKeyBytesLen]byte)
 	var A edwards25519.ExtendedGroupElement
 	privateScalar := copyBytes(priv.Serialize())
@@ -256,7 +269,7 @@ func SignFromScalar(curve *TwistedEdwardsCurve, priv *PrivateKey, nonce []byte, 
 	signature := new([64]byte)
 	copy(signature[:], encodedR[:])
 	copy(signature[32:], localS[:])
-	sigEd, err := ParseSignature(curve, signature[:])
+	sigEd, err := ParseSignature(signature[:])
 	if err != nil {
 		return nil, nil, err
 	}
@@ -272,7 +285,7 @@ func SignFromScalar(curve *TwistedEdwardsCurve, priv *PrivateKey, nonce []byte, 
 // the public nonce point with n-1 keys added.
 // r = K_Sum
 // s = r + hash512(k || A || M) * a
-func SignThreshold(curve *TwistedEdwardsCurve, priv *PrivateKey, groupPub *PublicKey, hash []byte, privNonce *PrivateKey,
+func SignThreshold(priv *PrivateKey, groupPub *PublicKey, hash []byte, privNonce *PrivateKey,
 	pubNonceSum *PublicKey) (r, s *big.Int, err error) {
 
 	if priv == nil || hash == nil || privNonce == nil || pubNonceSum == nil {
@@ -287,7 +300,7 @@ func SignThreshold(curve *TwistedEdwardsCurve, priv *PrivateKey, groupPub *Publi
 	// Where K_Sum is the sum of the public keys corresponding to
 	// the private nonce scalars of each group signature member.
 	// That is, R = k1G + ... + knG.
-	encodedGroupR := BigIntPointToEncodedBytes(pubNonceSum.GetX(),
+	encodedGroupR := bigIntPointToEncodedBytes(pubNonceSum.GetX(),
 		pubNonceSum.GetY())
 
 	// h = hash512(k || A || M)
@@ -311,7 +324,7 @@ func SignThreshold(curve *TwistedEdwardsCurve, priv *PrivateKey, groupPub *Publi
 	signature := new([64]byte)
 	copy(signature[:], encodedGroupR[:])
 	copy(signature[32:], localS[:])
-	sigEd, err := ParseSignature(curve, signature[:])
+	sigEd, err := ParseSignature(signature[:])
 	if err != nil {
 		return nil, nil, err
 	}
@@ -321,7 +334,7 @@ func SignThreshold(curve *TwistedEdwardsCurve, priv *PrivateKey, groupPub *Publi
 
 // Sign is the generalized and exported version of Ed25519 signing, that
 // handles both standard private secrets and non-standard scalars.
-func Sign(curve *TwistedEdwardsCurve, priv *PrivateKey, hash []byte) (r, s *big.Int, err error) {
+func Sign(priv *PrivateKey, hash []byte) (r, s *big.Int, err error) {
 	if priv == nil {
 		return nil, nil, fmt.Errorf("private key is nil")
 	}
@@ -332,8 +345,8 @@ func Sign(curve *TwistedEdwardsCurve, priv *PrivateKey, hash []byte) (r, s *big.
 	if priv.secret == nil {
 		privLE := copyBytes(priv.Serialize())
 		reverse(privLE)
-		nonce := nonceRFC6979(curve, privLE[:], hash, nil, nil)
-		return SignFromScalar(curve, priv, nonce, hash)
+		nonce := nonceRFC6979(privLE[:], hash, nil, nil)
+		return SignFromScalar(priv, nonce, hash)
 	}
 
 	return SignFromSecretNoReader(priv, hash)

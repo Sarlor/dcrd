@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -13,10 +13,10 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/decred/dcrd/chaincfg"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/database/ffldb"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/database/v2"
+	"github.com/decred/dcrd/database/v2/ffldb"
+	"github.com/decred/dcrd/dcrutil/v3"
 )
 
 // dbType is the database type name for this driver.
@@ -103,7 +103,7 @@ func TestCreateOpenFail(t *testing.T) {
 
 	// Ensure operations against a closed database return the expected
 	// error.
-	dbPath := filepath.Join(os.TempDir(), "ffldb-createfail")
+	dbPath := filepath.Join(os.TempDir(), "ffldb-createfail-v2")
 	_ = os.RemoveAll(dbPath)
 	db, err := database.Create(dbType, dbPath, blockDataNet)
 	if err != nil {
@@ -154,7 +154,7 @@ func TestPersistence(t *testing.T) {
 	t.Parallel()
 
 	// Create a new database to run tests against.
-	dbPath := filepath.Join(os.TempDir(), "ffldb-persistencetest")
+	dbPath := filepath.Join(os.TempDir(), "ffldb-persistencetest-v2")
 	_ = os.RemoveAll(dbPath)
 	db, err := database.Create(dbType, dbPath, blockDataNet)
 	if err != nil {
@@ -172,8 +172,9 @@ func TestPersistence(t *testing.T) {
 		"b1key2": "foo2",
 		"b1key3": "foo3",
 	}
-	genesisBlock := dcrutil.NewBlock(chaincfg.MainNetParams.GenesisBlock)
-	genesisHash := chaincfg.MainNetParams.GenesisHash
+	mainNetParams := chaincfg.MainNetParams()
+	genesisBlock := dcrutil.NewBlock(mainNetParams.GenesisBlock)
+	genesisHash := &mainNetParams.GenesisHash
 	err = db.Update(func(tx database.Tx) error {
 		metadataBucket := tx.Metadata()
 		if metadataBucket == nil {
@@ -260,7 +261,7 @@ func TestInterface(t *testing.T) {
 	t.Parallel()
 
 	// Create a new database to run tests against.
-	dbPath := filepath.Join(os.TempDir(), "ffldb-interfacetest")
+	dbPath := filepath.Join(os.TempDir(), "ffldb-interfacetest-v2")
 	_ = os.RemoveAll(dbPath)
 	db, err := database.Create(dbType, dbPath, blockDataNet)
 	if err != nil {
@@ -273,7 +274,7 @@ func TestInterface(t *testing.T) {
 	// Ensure the driver type is the expected value.
 	gotDbType := db.Type()
 	if gotDbType != dbType {
-		t.Errorf("Type: unepxected driver type - got %v, want %v",
+		t.Errorf("Type: unexpected driver type - got %v, want %v",
 			gotDbType, dbType)
 		return
 	}

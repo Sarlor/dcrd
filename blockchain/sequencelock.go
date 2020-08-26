@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2018 The Decred developers
+// Copyright (c) 2017-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,8 +7,9 @@ package blockchain
 import (
 	"fmt"
 
-	"github.com/decred/dcrd/blockchain/stake"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/blockchain/stake/v3"
+	"github.com/decred/dcrd/blockchain/standalone/v2"
+	"github.com/decred/dcrd/dcrutil/v3"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -50,9 +51,8 @@ func (b *BlockChain) calcSequenceLock(node *blockNode, tx *dcrutil.Tx, view *Utx
 	// included in a block at any given height or time.
 	msgTx := tx.MsgTx()
 	enforce := isActive && msgTx.Version >= 2
-	if !enforce || IsCoinBaseTx(msgTx) || isStakeBaseTx(msgTx) {
+	if !enforce || standalone.IsCoinBaseTx(msgTx) || isStakeBaseTx(msgTx) {
 		return sequenceLock, nil
-
 	}
 
 	for txInIndex, txIn := range msgTx.TxIn {

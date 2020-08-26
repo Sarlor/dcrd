@@ -1,5 +1,5 @@
 // Copyright (c) 2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,8 +8,10 @@ package hdkeychain_test
 import (
 	"fmt"
 
-	"github.com/decred/dcrd/chaincfg"
-	"github.com/decred/dcrd/hdkeychain"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/dcrec"
+	"github.com/decred/dcrd/dcrutil/v3"
+	"github.com/decred/dcrd/hdkeychain/v3"
 )
 
 // This example demonstrates how to generate a cryptographically random seed
@@ -23,7 +25,8 @@ func Example_newMaster() {
 	}
 
 	// Generate a new master node using the seed.
-	key, err := hdkeychain.NewMaster(seed, &chaincfg.MainNetParams)
+	net := chaincfg.MainNetParams()
+	key, err := hdkeychain.NewMaster(seed, net)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -56,7 +59,7 @@ func Example_defaultWalletLayout() {
 
 	// Ordinarily this would either be read from some encrypted source
 	// and be decrypted or generated as the NewMaster example shows, but
-	// for the purposes of this example, the private exteded key for the
+	// for the purposes of this example, the private extended key for the
 	// master node is being hard coded here.
 	master := "dprv3hCznBesA6jBushjx7y9NrfheE4ZshnaKYtsoLXefmLPzrXgEiXkd" +
 		"RMD6UngnmBYZzgNhdEd4K3PidxcaCiR6HC9hmpj8FcrP4Cv7zBwELA"
@@ -64,7 +67,8 @@ func Example_defaultWalletLayout() {
 	// Start by getting an extended key instance for the master node.
 	// This gives the path:
 	//   m
-	masterKey, err := hdkeychain.NewKeyFromString(master)
+	net := chaincfg.MainNetParams()
+	masterKey, err := hdkeychain.NewKeyFromString(master, net)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -119,12 +123,25 @@ func Example_defaultWalletLayout() {
 
 	// Get and show the address associated with the extended keys for the
 	// main Decred network.
-	acct0ExtAddr, err := acct0Ext10.Address(&chaincfg.MainNetParams)
+	//
+	// pubKeyHashAddr is a convenience function to convert an extended
+	// pubkey to a standard pay-to-pubkey-hash address.
+	pubKeyHashAddr := func(extKey *hdkeychain.ExtendedKey) (string, error) {
+		pkHash := dcrutil.Hash160(extKey.SerializedPubKey())
+		addr, err := dcrutil.NewAddressPubKeyHash(pkHash, net,
+			dcrec.STEcdsaSecp256k1)
+		if err != nil {
+			fmt.Println(err)
+			return "", err
+		}
+		return addr.String(), nil
+	}
+	acct0ExtAddr, err := pubKeyHashAddr(acct0Ext10)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	acct0IntAddr, err := acct0Int0.Address(&chaincfg.MainNetParams)
+	acct0IntAddr, err := pubKeyHashAddr(acct0Int0)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -152,7 +169,7 @@ func Example_audits() {
 
 	// Ordinarily this would either be read from some encrypted source
 	// and be decrypted or generated as the NewMaster example shows, but
-	// for the purposes of this example, the private exteded key for the
+	// for the purposes of this example, the private extended key for the
 	// master node is being hard coded here.
 	master := "dprv3hCznBesA6jBushjx7y9NrfheE4ZshnaKYtsoLXefmLPzrXgEiXkd" +
 		"RMD6UngnmBYZzgNhdEd4K3PidxcaCiR6HC9hmpj8FcrP4Cv7zBwELA"
@@ -160,7 +177,8 @@ func Example_audits() {
 	// Start by getting an extended key instance for the master node.
 	// This gives the path:
 	//   m
-	masterKey, err := hdkeychain.NewKeyFromString(master)
+	net := chaincfg.MainNetParams()
+	masterKey, err := hdkeychain.NewKeyFromString(master, net)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -169,11 +187,7 @@ func Example_audits() {
 	// Neuter the master key to generate a master public extended key.  This
 	// gives the path:
 	//   N(m/*)
-	masterPubKey, err := masterKey.Neuter()
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
+	masterPubKey := masterKey.Neuter()
 
 	// Share the master public extended key with the auditor.
 	fmt.Println("Audit key N(m/*):", masterPubKey)

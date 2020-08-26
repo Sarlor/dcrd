@@ -38,7 +38,7 @@ const (
 	// OP_RETURNs were missing or contained invalid addresses.
 	ErrSStxInvalidOutputs
 
-	// ErrSStxInOutProportions indicates the the number of inputs in an SStx
+	// ErrSStxInOutProportions indicates the number of inputs in an SStx
 	// was not equal to the number of output minus one.
 	ErrSStxInOutProportions
 
@@ -249,7 +249,7 @@ func (e RuleError) GetCode() ErrorCode {
 	return e.ErrorCode
 }
 
-// stakeRuleError creates an RuleError given a set of arguments.
+// stakeRuleError creates a RuleError given a set of arguments.
 func stakeRuleError(c ErrorCode, desc string) RuleError {
 	return RuleError{ErrorCode: c, Description: desc}
 }

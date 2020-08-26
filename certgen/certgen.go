@@ -22,9 +22,9 @@ import (
 	"time"
 )
 
-// NewTLSCertPair returns a new PEM-encoded x.509 certificate pair.  The
-// machine's local interface addresses and all variants of IPv4 and IPv6
-// localhost are included as valid IP addresses.
+// NewTLSCertPair returns a new PEM-encoded x.509 certificate pair with new
+// ECDSA keys.  The machine's local interface addresses and all variants of IPv4
+// and IPv6 localhost are included as valid IP addresses.
 func NewTLSCertPair(curve elliptic.Curve, organization string, validUntil time.Time, extraHosts []string) (cert, key []byte, err error) {
 	now := time.Now()
 	if validUntil.Before(now) {
@@ -61,7 +61,7 @@ func NewTLSCertPair(curve elliptic.Curve, organization string, validUntil time.T
 
 	addIP := func(ipAddr net.IP) {
 		for _, ip := range ipAddresses {
-			if bytes.Equal(ip, ipAddr) {
+			if ip.Equal(ipAddr) {
 				return
 			}
 		}

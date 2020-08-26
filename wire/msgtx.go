@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -118,8 +118,8 @@ const (
 	minTxPayload = 4 + 1 + 1 + 1 + 4 + 4
 
 	// freeListMaxScriptSize is the size of each buffer in the free list
-	// that	is used for deserializing scripts from the wire before they are
-	// concatenated into a single contiguous buffers.  This value was chosen
+	// that is used for deserializing scripts from the wire before they are
+	// concatenated into a single contiguous buffer.  This value was chosen
 	// because it is slightly more than twice the size of the vast majority
 	// of all "standard" scripts.  Larger scripts are still deserialized
 	// properly as the free list will simply be bypassed for them.
@@ -211,10 +211,11 @@ var scriptPool scriptFreeList = make(chan []byte, freeListMaxItems)
 // script.  It is encoded as a varInt containing the length of the array
 // followed by the bytes themselves.  An error is returned if the length is
 // greater than the passed maxAllowed parameter which helps protect against
-// memory exhaustion attacks and forced panics thorugh malformed messages.  The
+// memory exhaustion attacks and forced panics through malformed messages.  The
 // fieldName parameter is only used for the error message so it provides more
 // context in the error.
 func readScript(r io.Reader, pver uint32, maxAllowed uint32, fieldName string) ([]byte, error) {
+	const op = "readScript"
 	count, err := ReadVarInt(r, pver)
 	if err != nil {
 		return nil, err
@@ -224,9 +225,9 @@ func readScript(r io.Reader, pver uint32, maxAllowed uint32, fieldName string) (
 	// be possible to cause memory exhaustion and panics without a sane
 	// upper bound on this count.
 	if count > uint64(maxAllowed) {
-		str := fmt.Sprintf("%s is larger than the max allowed size "+
+		msg := fmt.Sprintf("%s is larger than the max allowed size "+
 			"[count %d, max %d]", fieldName, count, maxAllowed)
-		return nil, messageError("readScript", str)
+		return nil, messageError(op, ErrVarBytesTooLong, msg)
 	}
 
 	b := scriptPool.Borrow(count)
@@ -595,6 +596,7 @@ func writeTxScriptsToMsgTx(msg *MsgTx, totalScriptSize uint64, serType TxSeriali
 // decodePrefix decodes a transaction prefix and stores the contents
 // in the embedded msgTx.
 func (msg *MsgTx) decodePrefix(r io.Reader, pver uint32) (uint64, error) {
+	const op = "MsgTx.decodePrefix"
 	count, err := ReadVarInt(r, pver)
 	if err != nil {
 		return 0, err
@@ -604,10 +606,9 @@ func (msg *MsgTx) decodePrefix(r io.Reader, pver uint32) (uint64, error) {
 	// message.  It would be possible to cause memory exhaustion and panics
 	// without a sane upper bound on this count.
 	if count > uint64(maxTxInPerMessage) {
-		str := fmt.Sprintf("too many input transactions to fit into "+
-			"max message size [count %d, max %d]", count,
-			maxTxInPerMessage)
-		return 0, messageError("MsgTx.decodePrefix", str)
+		msg := fmt.Sprintf("too many input transactions to fit into max "+
+			"message size [count %d, max %d]", count, maxTxInPerMessage)
+		return 0, messageError(op, ErrTooManyTxs, msg)
 	}
 
 	// TxIns.
@@ -633,10 +634,9 @@ func (msg *MsgTx) decodePrefix(r io.Reader, pver uint32) (uint64, error) {
 	// message.  It would be possible to cause memory exhaustion and panics
 	// without a sane upper bound on this count.
 	if count > uint64(maxTxOutPerMessage) {
-		str := fmt.Sprintf("too many output transactions to fit into "+
-			"max message size [count %d, max %d]", count,
-			maxTxOutPerMessage)
-		return 0, messageError("MsgTx.decodePrefix", str)
+		msg := fmt.Sprintf("too many output transactions to fit into "+
+			"max message size [count %d, max %d]", count, maxTxOutPerMessage)
+		return 0, messageError(op, ErrTooManyTxs, msg)
 	}
 
 	// TxOuts.
@@ -670,6 +670,8 @@ func (msg *MsgTx) decodePrefix(r io.Reader, pver uint32) (uint64, error) {
 }
 
 func (msg *MsgTx) decodeWitness(r io.Reader, pver uint32, isFull bool) (uint64, error) {
+	const op = "MsgTx.decodeWitness"
+
 	// Witness only; generate the TxIn list and fill out only the
 	// sigScripts.
 	var totalScriptSize uint64
@@ -684,9 +686,8 @@ func (msg *MsgTx) decodeWitness(r io.Reader, pver uint32, isFull bool) (uint64, 
 		// without a sane upper bound on this count.
 		if count > uint64(maxTxInPerMessage) {
 			str := fmt.Sprintf("too many input transactions to fit into "+
-				"max message size [count %d, max %d]", count,
-				maxTxInPerMessage)
-			return 0, messageError("MsgTx.decodeWitness", str)
+				"max message size [count %d, max %d]", count, maxTxInPerMessage)
+			return 0, messageError(op, ErrTooManyTxs, str)
 		}
 
 		txIns := make([]TxIn, count)
@@ -716,20 +717,18 @@ func (msg *MsgTx) decodeWitness(r io.Reader, pver uint32, isFull bool) (uint64, 
 		// Don't allow the deserializer to panic by accessing memory
 		// that doesn't exist.
 		if int(count) != len(msg.TxIn) {
-			str := fmt.Sprintf("non equal witness and prefix txin quantities "+
-				"(witness %v, prefix %v)", count,
-				len(msg.TxIn))
-			return 0, messageError("MsgTx.decodeWitness", str)
+			msg := fmt.Sprintf("non equal witness and prefix txin quantities "+
+				"(witness %v, prefix %v)", count, len(msg.TxIn))
+			return 0, messageError(op, ErrMismatchedWitnessCount, msg)
 		}
 
 		// Prevent more input transactions than could possibly fit into a
 		// message.  It would be possible to cause memory exhaustion and panics
 		// without a sane upper bound on this count.
 		if count > uint64(maxTxInPerMessage) {
-			str := fmt.Sprintf("too many input transactions to fit into "+
-				"max message size [count %d, max %d]", count,
-				maxTxInPerMessage)
-			return 0, messageError("MsgTx.decodeWitness", str)
+			msg := fmt.Sprintf("too many input transactions to fit into "+
+				"max message size [count %d, max %d]", count, maxTxInPerMessage)
+			return 0, messageError(op, ErrTooManyTxs, msg)
 		}
 
 		// Read in the witnesses, and copy them into the already generated
@@ -758,6 +757,8 @@ func (msg *MsgTx) decodeWitness(r io.Reader, pver uint32, isFull bool) (uint64, 
 // See Deserialize for decoding transactions stored to disk, such as in a
 // database, as opposed to decoding transactions from the wire.
 func (msg *MsgTx) BtcDecode(r io.Reader, pver uint32) error {
+	const op = "MsgTx.BtcDecode"
+
 	// The serialized encoding of the version includes the real transaction
 	// version in the lower 16 bits and the transaction serialization type
 	// in the upper 16 bits.
@@ -826,7 +827,7 @@ func (msg *MsgTx) BtcDecode(r io.Reader, pver uint32) error {
 			totalScriptSizeOuts, txSerType)
 
 	default:
-		return messageError("MsgTx.BtcDecode", "unsupported transaction type")
+		return messageError(op, ErrUnknownTxType, "unsupported transaction type")
 	}
 
 	return nil
@@ -947,7 +948,8 @@ func (msg *MsgTx) BtcEncode(w io.Writer, pver uint32) error {
 		}
 
 	default:
-		return messageError("MsgTx.BtcEncode", "unsupported transaction type")
+		return messageError("MsgTx.BtcEncode", ErrUnknownTxType,
+			"unsupported transaction type")
 	}
 
 	return nil
@@ -1154,7 +1156,7 @@ func WriteOutPoint(w io.Writer, pver uint32, version uint16, op *OutPoint) error
 // (TxIn) in the transaction prefix.
 func readTxInPrefix(r io.Reader, pver uint32, serType TxSerializeType, version uint16, ti *TxIn) error {
 	if serType == TxSerializeOnlyWitness {
-		return messageError("readTxInPrefix",
+		return messageError("readTxInPrefix", ErrReadInPrefixFromWitnessOnlyTx,
 			"tried to read a prefix input for a witness only tx")
 	}
 
@@ -1224,7 +1226,7 @@ func writeTxInWitness(w io.Writer, pver uint32, version uint16, ti *TxIn) error 
 	}
 
 	// BlockIndex.
-	binarySerializer.PutUint32(w, littleEndian, ti.BlockIndex)
+	err = binarySerializer.PutUint32(w, littleEndian, ti.BlockIndex)
 	if err != nil {
 		return err
 	}

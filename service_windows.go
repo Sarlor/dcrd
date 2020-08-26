@@ -36,7 +36,7 @@ var elog *eventlog.Log
 
 // logServiceStartOfDay logs information about dcrd when the main server has
 // been started to the Windows event log.
-func logServiceStartOfDay(srvr *server) {
+func logServiceStartOfDay(cfg *config) {
 	var message string
 	message += fmt.Sprintf("Version %s\n", version.String())
 	message += fmt.Sprintf("Configuration directory: %s\n", cfg.HomeDir)
@@ -61,19 +61,16 @@ func (s *dcrdService) Execute(args []string, r <-chan svc.ChangeRequest, changes
 
 	// Start dcrdMain in a separate goroutine so the service can start
 	// quickly.  Shutdown (along with a potential error) is reported via
-	// doneChan.  serverChan is notified with the main server instance once
-	// it is started so it can be gracefully stopped.
+	// doneChan.
 	doneChan := make(chan error)
-	serverChan := make(chan *server)
 	go func() {
-		err := dcrdMain(serverChan)
+		err := dcrdMain()
 		doneChan <- err
 	}()
 
 	// Service is now started.
 	changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
 
-	var mainServer *server
 loop:
 	for {
 		select {
@@ -95,9 +92,8 @@ loop:
 					"request #%d.", c))
 			}
 
-		case srvr := <-serverChan:
-			mainServer = srvr
-			logServiceStartOfDay(mainServer)
+		case cfg := <-serviceStartOfDayChan:
+			logServiceStartOfDay(cfg)
 
 		case err := <-doneChan:
 			if err != nil {
@@ -155,7 +151,7 @@ func installService() error {
 
 	// Support events to the event log using the standard "standard" Windows
 	// EventCreate.exe message file.  This allows easy logging of custom
-	// messges instead of needing to create our own message catalog.
+	// messages instead of needing to create our own message catalog.
 	eventlog.Remove(svcName)
 	eventsSupported := uint32(eventlog.Error | eventlog.Warning | eventlog.Info)
 	return eventlog.InstallAsEventCreate(svcName, eventsSupported)

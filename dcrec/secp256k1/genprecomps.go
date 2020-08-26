@@ -1,5 +1,5 @@
 // Copyright 2015 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -18,11 +18,11 @@ import (
 	"log"
 	"os"
 
-	"github.com/decred/dcrd/dcrec/secp256k1"
+	"github.com/decred/dcrd/dcrec/secp256k1/v3"
 )
 
 func main() {
-	fi, err := os.Create("secp256k1.go")
+	fi, err := os.Create("compressedbytepoints.go")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -43,6 +43,7 @@ func main() {
 	base64.StdEncoding.Encode(encoded, compressed.Bytes())
 
 	fmt.Fprintln(fi, "// Copyright (c) 2015 The btcsuite developers")
+	fmt.Fprintln(fi, "// Copyright (c) 2015-2020 The Decred developers")
 	fmt.Fprintln(fi, "// Use of this source code is governed by an ISC")
 	fmt.Fprintln(fi, "// license that can be found in the LICENSE file.")
 	fmt.Fprintln(fi)
@@ -51,9 +52,9 @@ func main() {
 	fmt.Fprintln(fi, "// Auto-generated file (see genprecomps.go)")
 	fmt.Fprintln(fi, "// DO NOT EDIT")
 	fmt.Fprintln(fi)
-	fmt.Fprintf(fi, "var secp256k1BytePoints = %q\n", string(encoded))
+	fmt.Fprintf(fi, "var compressedBytePoints = %q\n", string(encoded))
 
-	a1, b1, a2, b2 := secp256k1.S256().EndomorphismVectors()
+	a1, b1, a2, b2 := secp256k1.EndomorphismVectors()
 	fmt.Println("The following values are the computed linearly " +
 		"independent vectors needed to make use of the secp256k1 " +
 		"endomorphism:")

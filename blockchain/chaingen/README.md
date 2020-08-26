@@ -1,9 +1,9 @@
 chaingen
 ========
 
-[![Build Status](https://travis-ci.org/decred/dcrd.png?branch=master)](https://travis-ci.org/decred/dcrd)
-[![ISC License](http://img.shields.io/badge/license-ISC-blue.svg)](http://copyfree.org)
-[![GoDoc](https://img.shields.io/badge/godoc-reference-blue.svg)](http://godoc.org/github.com/decred/dcrd/blockchain/chaingen)
+[![Build Status](https://github.com/decred/dcrd/workflows/Build%20and%20Test/badge.svg)](https://github.com/decred/dcrd/actions)
+[![ISC License](https://img.shields.io/badge/license-ISC-blue.svg)](http://copyfree.org)
+[![Doc](https://img.shields.io/badge/doc-reference-blue.svg)](https://pkg.go.dev/github.com/decred/dcrd/blockchain/v3/chaingen)
 
 Package chaingen provides facilities for generating a full chain of blocks.
 
@@ -25,10 +25,9 @@ functions.
 
 ## Examples
 
-* [Basic Usage Example]
-  (http://godoc.org/github.com/decred/dcrd/blockchain/chaingen#example-package--BasicUsage)  
+* [Basic Usage Example](https://pkg.go.dev/github.com/decred/dcrd/blockchain/v3/chaingen#example-package-BasicUsage)  
   Demonstrates creating a new generator instance and using it to generate the
-  required premine block and enough blocks to have mature coinbase outputs to
+  required first block and enough blocks to have mature coinbase outputs to
   work with along with asserting the generator state along the way.
 
 ## Installation

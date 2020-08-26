@@ -1,13 +1,11 @@
 // Copyright (c) 2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 /*
 Package hdkeychain provides an API for Decred hierarchical deterministic
 extended keys (based on BIP0032).
-
-Overview
 
 The ability to implement hierarchical deterministic wallets depends on the
 ability to create and derive hierarchical deterministic extended keys.
@@ -26,8 +24,8 @@ Transaction Signing Keys and Payment Addresses
 
 In order to create and sign transactions, or provide others with addresses to
 send funds to, the underlying key and address material must be accessible.  This
-package provides the ECPubKey, ECPrivKey, and Address functions for this
-purpose.
+package provides the SerializedPubKey and SerializedPrivKey functions for this
+purpose.  The caller may then create the desired address types.
 
 The Master Node
 
@@ -72,14 +70,15 @@ Serializing and Deserializing Extended Keys
 Extended keys are serialized and deserialized with the String and
 NewKeyFromString functions.  The serialized key is a Base58-encoded string which
 looks like the following:
-	public key:   xpub68Gmy5EdvgibQVfPdqkBBCHxA5htiqg55crXYuXoQRKfDBFA1WEjWgP6LHhwBZeNK1VTsfTFUHCdrfp1bgwQ9xv5ski8PX9rL2dZXvgGDnw
-	private key:  xprv9uHRZZhk6KAJC1avXpDAp4MDc3sQKNxDiPvvkX8Br5ngLNv1TxvUxt4cV1rGL5hj6KCesnDYUhd7oWgT11eZG7XnxHrnYeSvkzY7d2bhkJ7
+	public key:   dpubZCGVaKZBiMo7pMgLaZm1qmchjWenTeVcUdFQkTNsFGFEA6xs4EW8PKiqYqP7HBAitt9Hw16VQkQ1tjsZQSHNWFc6bEK6bLqrbco24FzBTY4
+	private key:  dprv3kUQDBztdyjKuwnaL3hfKYpT7W6X2huYH5d61YSWFBebSYwEBHAXJkCpQ7rvMAxPzKqxVCGLvBqWvGxXjAyMJsV1XwKkfnQCM9KctC8k8bk
 
 Network
 
 Extended keys are much like normal Decred addresses in that they have version
-bytes which tie them to a specific network.  The SetNet and IsForNet functions
-are provided to set and determinine which network an extended key is associated
-with.
+bytes which tie them to a specific network.  The network that an extended key is
+associated with is specified when creating and decoding the key.  In the case of
+decoding, an error will be returned if a given encoded extended key is not for
+the specified network.
 */
 package hdkeychain

@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016-2018 The Decred developers
+// Copyright (c) 2016-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/txscript/v3"
 	"github.com/decred/dcrd/wire"
 	"github.com/decred/slog"
 )
@@ -25,15 +25,13 @@ const (
 // log is a logger that is initialized with no output filters.  This
 // means the package will not perform any logging by default until the caller
 // requests it.
-var log slog.Logger
-
 // The default amount of logging is none.
-func init() {
-	DisableLog()
-}
+var log = slog.Disabled
 
 // DisableLog disables all library log output.  Logging output is disabled
 // by default until UseLogger is called.
+//
+// Deprecated: Use UseLogger(slog.Disabled) instead.
 func DisableLog() {
 	log = slog.Disabled
 }
@@ -41,19 +39,6 @@ func DisableLog() {
 // UseLogger uses a specified Logger to output package logging info.
 func UseLogger(logger slog.Logger) {
 	log = logger
-}
-
-// LogClosure is a closure that can be printed with %v to be used to
-// generate expensive-to-create data for a detailed log level and avoid doing
-// the work if the data isn't printed.
-type logClosure func() string
-
-func (c logClosure) String() string {
-	return c()
-}
-
-func newLogClosure(c func() string) logClosure {
-	return logClosure(c)
 }
 
 // directionString is a helper function that returns a string that represents
@@ -112,7 +97,6 @@ func locatorSummary(locator []*chainhash.Hash, stopHash *chainhash.Hash) string 
 	}
 
 	return fmt.Sprintf("no locator, stop %s", stopHash)
-
 }
 
 // sanitizeString strips any characters which are even remotely dangerous, such

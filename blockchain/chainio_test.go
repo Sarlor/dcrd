@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2015-2018 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -14,9 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/decred/dcrd/blockchain/stake"
+	"github.com/decred/dcrd/blockchain/stake/v3"
+	"github.com/decred/dcrd/blockchain/standalone/v2"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
+	"github.com/decred/dcrd/database/v2"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -65,6 +66,13 @@ func hexToExtraData(s string) [32]byte {
 	return extraData
 }
 
+// isNotInMainChainErr returns whether or not the passed error is an
+// errNotInMainChain error.
+func isNotInMainChainErr(err error) bool {
+	var e errNotInMainChain
+	return errors.As(err, &e)
+}
+
 // TestErrNotInMainChain ensures the functions related to errNotInMainChain work
 // as expected.
 func TestErrNotInMainChain(t *testing.T) {
@@ -73,7 +81,7 @@ func TestErrNotInMainChain(t *testing.T) {
 
 	// Ensure the stringized output for the error is as expected.
 	if err.Error() != errStr {
-		t.Fatalf("errNotInMainChain retuned unexpected error string - "+
+		t.Fatalf("errNotInMainChain returned unexpected error string - "+
 			"got %q, want %q", err.Error(), errStr)
 	}
 
@@ -114,16 +122,6 @@ func TestBlockIndexSerialization(t *testing.T) {
 		ExtraData:    hexToExtraData("8f01ed92645e0a6b11ee3b3c0000000000000000000000000000000000000000"),
 		StakeVersion: 4,
 	}
-	baseTicketsVoted := []chainhash.Hash{
-		*newHashFromStr("8b62a877544753ea80a822142a48ec066170e9381d21a9e8a84bc7373f0f9b2e"),
-		*newHashFromStr("4427a003a7aceb1404ffd9072e9aff1e128a24333a543332030e91668a389db7"),
-		*newHashFromStr("4415b88ac74881d7b6b15d41df465257cd1cc92d55e95f1b648434aef3a2110b"),
-		*newHashFromStr("9d2621b57352088809d3a069b04b76c832f30a76da14e56aece72208b3e5b87a"),
-	}
-	baseTicketsRevoked := []chainhash.Hash{
-		*newHashFromStr("8146f01b8ffca8008ebc80293d2978d63b1dffa5c456a73e7b39a9b1e695e8eb"),
-		*newHashFromStr("2292ff2461e725c58cc6e2051eac2a10e6ee6d1f62327ed676b7a196fb94be0c"),
-	}
 	baseVoteInfo := []stake.VoteVersionTuple{
 		{Version: 4, Bits: 0x0001},
 		{Version: 4, Bits: 0x0015},
@@ -135,52 +133,48 @@ func TestBlockIndexSerialization(t *testing.T) {
 		name       string
 		entry      blockIndexEntry
 		serialized []byte
-	}{
-		{
-			name: "no votes, no revokes",
-			entry: blockIndexEntry{
-				header:         baseHeader,
-				status:         statusDataStored | statusValid,
-				voteInfo:       nil,
-				ticketsVoted:   nil,
-				ticketsRevoked: nil,
-			},
-			serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f833a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f011aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0a6b11ee3b3c000000000000000000000000000000000000000004000000030000"),
+	}{{
+		name: "no votes",
+		entry: blockIndexEntry{
+			header:   baseHeader,
+			status:   statusDataStored | statusValidated,
+			voteInfo: nil,
 		},
-		{
-			name: "1 vote, no revokes",
-			entry: blockIndexEntry{
-				header:         baseHeader,
-				status:         statusDataStored | statusValid,
-				voteInfo:       baseVoteInfo[:1],
-				ticketsVoted:   baseTicketsVoted[:1],
-				ticketsRevoked: nil,
-			},
-			serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f833a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f011aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0a6b11ee3b3c00000000000000000000000000000000000000000400000003012e9b0f3f37c74ba8e8a9211d38e9706106ec482a1422a880ea53475477a8628b040100"),
+		serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3" +
+			"425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470" +
+			"d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f83" +
+			"3a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f0" +
+			"11aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0" +
+			"a6b11ee3b3c0000000000000000000000000000000000000000040000000300"),
+	}, {
+		name: "1 vote",
+		entry: blockIndexEntry{
+			header:   baseHeader,
+			status:   statusDataStored | statusValidated,
+			voteInfo: baseVoteInfo[:1],
 		},
-		{
-			name: "no votes, 1 revoke",
-			entry: blockIndexEntry{
-				header:         baseHeader,
-				status:         statusDataStored | statusValid,
-				voteInfo:       nil,
-				ticketsVoted:   nil,
-				ticketsRevoked: baseTicketsRevoked[:1],
-			},
-			serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f833a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f011aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0a6b11ee3b3c000000000000000000000000000000000000000004000000030001ebe895e6b1a9397b3ea756c4a5ff1d3bd678293d2980bc8e00a8fc8f1bf04681"),
+		serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a" +
+			"3425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f99314" +
+			"70d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06" +
+			"f833a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a100009" +
+			"86f011aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92" +
+			"645e0a6b11ee3b3c00000000000000000000000000000000000000000400000" +
+			"003010401"),
+	}, {
+		name: "4 votes, same vote versions, different vote bits",
+		entry: blockIndexEntry{
+			header:   baseHeader,
+			status:   statusDataStored | statusValidated,
+			voteInfo: baseVoteInfo,
 		},
-		{
-			name: "4 votes, same vote versions, different vote bits, 2 revokes",
-			entry: blockIndexEntry{
-				header:         baseHeader,
-				status:         statusDataStored | statusValid,
-				voteInfo:       baseVoteInfo,
-				ticketsVoted:   baseTicketsVoted,
-				ticketsRevoked: baseTicketsRevoked,
-			},
-			serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f833a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f011aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0a6b11ee3b3c00000000000000000000000000000000000000000400000003042e9b0f3f37c74ba8e8a9211d38e9706106ec482a1422a880ea53475477a8628b0401b79d388a66910e033233543a33248a121eff9a2e07d9ff0414ebaca703a0274404150b11a2f3ae3484641b5fe9552dc91ccd575246df415db1b6d78148c78ab8154404157ab8e5b30822e7ec6ae514da760af332c8764bb069a0d30988085273b521269d040102ebe895e6b1a9397b3ea756c4a5ff1d3bd678293d2980bc8e00a8fc8f1bf046810cbe94fb96a1b776d67e32621f6deee6102aac1e05e2c68cc525e76124ff9222"),
-		},
-	}
+		serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3" +
+			"425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470" +
+			"d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f83" +
+			"3a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f0" +
+			"11aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0" +
+			"a6b11ee3b3c00000000000000000000000000000000000000000400000003040" +
+			"401041504150401"),
+	}}
 
 	for _, test := range tests {
 		// Ensure the function to calculate the serialized size without
@@ -281,84 +275,63 @@ func TestBlockIndexDecodeErrors(t *testing.T) {
 		serialized []byte
 		bytesRead  int // Expected number of bytes read.
 		errType    error
-	}{
-		{
-			name:       "nothing serialized",
-			entry:      blockIndexEntry{},
-			serialized: hexToBytes(""),
-			errType:    errDeserialize(""),
-			bytesRead:  0,
-		},
-		{
-			name:       "no data after block header",
-			entry:      blockIndexEntry{},
-			serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f833a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f011aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0a6b11ee3b3c000000000000000000000000000000000000000004000000"),
-			errType:    errDeserialize(""),
-			bytesRead:  180,
-		},
-		{
-			name:       "no data after status",
-			entry:      blockIndexEntry{},
-			serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f833a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f011aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0a6b11ee3b3c00000000000000000000000000000000000000000400000003"),
-			errType:    errDeserialize(""),
-			bytesRead:  181,
-		},
-		{
-			name:       "no data after num votes with no votes",
-			entry:      blockIndexEntry{},
-			serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f833a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f011aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0a6b11ee3b3c0000000000000000000000000000000000000000040000000300"),
-			errType:    errDeserialize(""),
-			bytesRead:  182,
-		},
-		{
-			name:       "no data after num votes with votes",
-			entry:      blockIndexEntry{},
-			serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f833a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f011aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0a6b11ee3b3c0000000000000000000000000000000000000000040000000301"),
-			errType:    errDeserialize(""),
-			bytesRead:  182,
-		},
-		{
-			name:       "short data in vote ticket hash",
-			entry:      blockIndexEntry{},
-			serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f833a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f011aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0a6b11ee3b3c00000000000000000000000000000000000000000400000003012e9b0f3f37c74ba8e8a9211d38e9706106ec482a1422a880ea53475477a862"),
-			errType:    errDeserialize(""),
-			bytesRead:  182,
-		},
-		{
-			name:       "no data after vote ticket hash",
-			entry:      blockIndexEntry{},
-			serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f833a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f011aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0a6b11ee3b3c00000000000000000000000000000000000000000400000003012e9b0f3f37c74ba8e8a9211d38e9706106ec482a1422a880ea53475477a8628b"),
-			errType:    errDeserialize(""),
-			bytesRead:  214,
-		},
-		{
-			name:       "no data after vote version",
-			entry:      blockIndexEntry{},
-			serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f833a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f011aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0a6b11ee3b3c00000000000000000000000000000000000000000400000003012e9b0f3f37c74ba8e8a9211d38e9706106ec482a1422a880ea53475477a8628b04"),
-			errType:    errDeserialize(""),
-			bytesRead:  215,
-		},
-		{
-			name:       "no data after votes",
-			entry:      blockIndexEntry{},
-			serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f833a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f011aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0a6b11ee3b3c00000000000000000000000000000000000000000400000003012e9b0f3f37c74ba8e8a9211d38e9706106ec482a1422a880ea53475477a8628b0401"),
-			errType:    errDeserialize(""),
-			bytesRead:  216,
-		},
-		{
-			name:       "no data after num revokes with revokes",
-			entry:      blockIndexEntry{},
-			serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f833a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f011aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0a6b11ee3b3c000000000000000000000000000000000000000004000000030001"),
-			errType:    errDeserialize(""),
-			bytesRead:  183,
-		},
-	}
+	}{{
+		name:       "nothing serialized",
+		entry:      blockIndexEntry{},
+		serialized: hexToBytes(""),
+		errType:    errDeserialize(""),
+		bytesRead:  0,
+	}, {
+		name:  "no data after block header",
+		entry: blockIndexEntry{},
+		serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3" +
+			"425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470" +
+			"d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f83" +
+			"3a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f0" +
+			"11aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0" +
+			"a6b11ee3b3c000000000000000000000000000000000000000004000000"),
+		errType:   errDeserialize(""),
+		bytesRead: 180,
+	}, {
+		name:  "no data after status",
+		entry: blockIndexEntry{},
+		serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3" +
+			"425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470" +
+			"d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f83" +
+			"3a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f0" +
+			"11aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0" +
+			"a6b11ee3b3c00000000000000000000000000000000000000000400000003"),
+		errType:   errDeserialize(""),
+		bytesRead: 181,
+	}, {
+		name:  "no data after num votes with votes",
+		entry: blockIndexEntry{},
+		serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3" +
+			"425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470" +
+			"d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f83" +
+			"3a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f0" +
+			"11aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0" +
+			"a6b11ee3b3c0000000000000000000000000000000000000000040000000301"),
+		errType:   errDeserialize(""),
+		bytesRead: 182,
+	}, {
+		name:  "no data after vote version",
+		entry: blockIndexEntry{},
+		serialized: hexToBytes("040000001f733757b25d804863dbcad599c931e15e3a3" +
+			"425e21a6716690100000000000066c664d887c6e2c0c132b3c5c8c82f9931470" +
+			"d6ecbc5ccc003755d7979bbf25edec2d752551f38a2bd4bb0d06ff9a1ed06f83" +
+			"3a5aa8dc12bdc27759b056529020100313e16e64c0b0400030274a10000986f0" +
+			"11aee686fbd010000000f4b02001f2c000037c4665904f85df58f01ed92645e0" +
+			"a6b11ee3b3c000000000000000000000000000000000000000004000000030104"),
+		errType:   errDeserialize(""),
+		bytesRead: 183,
+	}}
 
 	for _, test := range tests {
 		// Ensure the expected error type is returned.
 		gotBytesRead, err := decodeBlockIndexEntry(test.serialized,
 			&test.entry)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.errType) {
+		if !errors.As(err, &test.errType) {
 			t.Errorf("decodeBlockIndexEntry (%s): expected error "+
 				"type does not match - got %T, want %T",
 				test.name, err, test.errType)
@@ -485,53 +458,81 @@ func TestStxoDecodeErrors(t *testing.T) {
 	tests := []struct {
 		name       string
 		stxo       spentTxOut
-		txVersion  int32 // When the txout is not fully spent.
 		serialized []byte
-		bytesRead  int // Expected number of bytes read.
 		errType    error
+		bytesRead  int // Expected number of bytes read.
 	}{
 		{
-			name:       "nothing serialized",
+			// [EOF]
+			name:       "nothing serialized (no flags)",
 			stxo:       spentTxOut{},
 			serialized: hexToBytes(""),
 			errType:    errDeserialize(""),
 			bytesRead:  0,
 		},
 		{
-			name:       "no data after flags w/o version",
+			// [<flags 00> EOF]
+			name:       "no compressed txout script version",
 			stxo:       spentTxOut{},
 			serialized: hexToBytes("00"),
 			errType:    errDeserialize(""),
 			bytesRead:  1,
 		},
 		{
-			name:       "no data after flags code",
+			// [<flags 10> <script version 00> EOF]
+			name:       "no tx version data after empty script for a fully spent regular stxo",
 			stxo:       spentTxOut{},
-			serialized: hexToBytes("14"),
+			serialized: hexToBytes("1000"),
 			errType:    errDeserialize(""),
-			bytesRead:  1,
+			bytesRead:  2,
 		},
 		{
-			name:       "no tx version data after script",
+			// [<flags 10> <script version 00> <compressed pk script 01 6e ...> EOF]
+			name:       "no tx version data after a pay-to-script-hash script for a fully spent regular stxo",
 			stxo:       spentTxOut{},
-			serialized: hexToBytes("1400016edbc6c4d31bae9f1ccc38538a114bf42de65e86"),
+			serialized: hexToBytes("1000016edbc6c4d31bae9f1ccc38538a114bf42de65e86"),
 			errType:    errDeserialize(""),
 			bytesRead:  23,
 		},
 		{
-			name:       "no stakeextra data after script for ticket",
+			// [<flags 14> <script version 00> <compressed pk script 01 6e ...> <tx version 01> EOF]
+			name:       "no stakeextra data after script for a fully spent ticket stxo",
 			stxo:       spentTxOut{},
 			serialized: hexToBytes("1400016edbc6c4d31bae9f1ccc38538a114bf42de65e8601"),
 			errType:    errDeserialize(""),
 			bytesRead:  24,
 		},
 		{
-			name:       "incomplete compressed txout",
+			// [<flags 14> <script version 00> <compressed pk script 01 6e ...> <tx version 01> <stakeextra {num outputs 01}> EOF]
+			name:       "truncated stakeextra data after script for a fully spent ticket stxo (num outputs only)",
 			stxo:       spentTxOut{},
-			txVersion:  1,
-			serialized: hexToBytes("1432"),
+			serialized: hexToBytes("1400016edbc6c4d31bae9f1ccc38538a114bf42de65e860101"),
 			errType:    errDeserialize(""),
-			bytesRead:  2,
+			bytesRead:  25,
+		},
+		{
+			// [<flags 14> <script version 00> <compressed pk script 01 6e ...> <tx version 01> <stakeextra {num outputs 01} {amount 0f}> EOF]
+			name:       "truncated stakeextra data after script for a fully spent ticket stxo (num outputs and amount only)",
+			stxo:       spentTxOut{},
+			serialized: hexToBytes("1400016edbc6c4d31bae9f1ccc38538a114bf42de65e8601010f"),
+			errType:    errDeserialize(""),
+			bytesRead:  26,
+		},
+		{
+			// [<flags 14> <script version 00> <compressed pk script 01 6e ...> <tx version 01> <stakeextra {num outputs 01} {amount 0f} {script version 00}> EOF]
+			name:       "truncated stakeextra data after script for a fully spent ticket stxo (num outputs, amount, and script version only)",
+			stxo:       spentTxOut{},
+			serialized: hexToBytes("1400016edbc6c4d31bae9f1ccc38538a114bf42de65e8601010f00"),
+			errType:    errDeserialize(""),
+			bytesRead:  27,
+		},
+		{
+			// [<flags 14> <script version 00> <compressed pk script 01 6e ...> <tx version 01> <stakeextra {num outputs 01} {amount 0f} {script version 00} {script size 1a} {25 bytes of script instead of 26}> EOF]
+			name:       "truncated stakeextra data after script for a fully spent ticket stxo (script size specified as 0x1a, but only 0x19 bytes provided)",
+			stxo:       spentTxOut{},
+			serialized: hexToBytes("1400016edbc6c4d31bae9f1ccc38538a114bf42de65e8601010f001aba76a9140cdf9941c0c221243cb8672cd1ad2c4c0933850588"),
+			errType:    errDeserialize(""),
+			bytesRead:  28,
 		},
 	}
 
@@ -539,7 +540,7 @@ func TestStxoDecodeErrors(t *testing.T) {
 		// Ensure the expected error type is returned.
 		gotBytesRead, err := decodeSpentTxOut(test.serialized,
 			&test.stxo, test.stxo.amount, test.stxo.height, test.stxo.index)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.errType) {
+		if !errors.As(err, &test.errType) {
 			t.Errorf("decodeSpentTxOut (%s): expected error type "+
 				"does not match - got %T, want %T", test.name,
 				err, test.errType)
@@ -879,7 +880,7 @@ func TestSpendJournalErrors(t *testing.T) {
 		// slice is nil.
 		stxos, err := deserializeSpendJournalEntry(test.serialized,
 			test.blockTxns)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.errType) {
+		if !errors.As(err, &test.errType) {
 			t.Errorf("deserializeSpendJournalEntry (%s): expected "+
 				"error type does not match - got %T, want %T",
 				test.name, err, test.errType)
@@ -895,7 +896,7 @@ func TestSpendJournalErrors(t *testing.T) {
 }
 
 // TestUtxoSerialization ensures serializing and deserializing unspent
-// trasaction output entries works as expected.
+// transaction output entries works as expected.
 func TestUtxoSerialization(t *testing.T) {
 	t.Parallel()
 
@@ -1267,7 +1268,6 @@ func TestUtxoSerialization(t *testing.T) {
 					"%v", i, test.name, outputIndex,
 					gotSpent, wantSpent)
 				continue
-
 			}
 		}
 		if len(utxoEntry.sparseOutputs) != numUnspent {
@@ -1345,7 +1345,7 @@ func TestUtxoEntryDeserializeErrors(t *testing.T) {
 		// Ensure the expected error type is returned and the returned
 		// entry is nil.
 		entry, err := deserializeUtxoEntry(test.serialized)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.errType) {
+		if !errors.As(err, &test.errType) {
 			t.Errorf("deserializeUtxoEntry (%s): expected error "+
 				"type does not match - got %T, want %T",
 				test.name, err, test.errType)
@@ -1378,7 +1378,7 @@ func TestBestChainStateSerialization(t *testing.T) {
 				totalTxns:    1,
 				totalSubsidy: 0,
 				workSum: func() *big.Int {
-					workSum.Add(workSum, CalcWork(486604799))
+					workSum.Add(workSum, standalone.CalcWork(486604799))
 					return new(big.Int).Set(workSum)
 				}(), // 0x0100010001
 			},
@@ -1392,7 +1392,7 @@ func TestBestChainStateSerialization(t *testing.T) {
 				totalTxns:    2,
 				totalSubsidy: 123456789,
 				workSum: func() *big.Int {
-					workSum.Add(workSum, CalcWork(486604799))
+					workSum.Add(workSum, standalone.CalcWork(486604799))
 					return new(big.Int).Set(workSum)
 				}(), // 0x0200020002,
 			},
@@ -1423,7 +1423,6 @@ func TestBestChainStateSerialization(t *testing.T) {
 				"mismatched state - got %v, want %v", i,
 				test.name, state, test.state)
 			continue
-
 		}
 	}
 }
@@ -1458,15 +1457,16 @@ func TestBestChainStateDeserializeErrors(t *testing.T) {
 	for _, test := range tests {
 		// Ensure the expected error type and code is returned.
 		_, err := deserializeBestChainState(test.serialized)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.errType) {
+		if !errors.As(err, &test.errType) {
 			t.Errorf("deserializeBestChainState (%s): expected "+
 				"error type does not match - got %T, want %T",
 				test.name, err, test.errType)
 			continue
 		}
-		if derr, ok := err.(database.Error); ok {
-			tderr := test.errType.(database.Error)
-			if derr.ErrorCode != tderr.ErrorCode {
+		var derr database.Error
+		if errors.As(err, &derr) {
+			var tderr database.Error
+			if !errors.As(test.errType, &tderr) || derr.ErrorCode != tderr.ErrorCode {
 				t.Errorf("deserializeBestChainState (%s): "+
 					"wrong  error code got: %v, want: %v",
 					test.name, derr.ErrorCode,

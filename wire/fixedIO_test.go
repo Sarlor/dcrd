@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -10,7 +10,7 @@ import (
 	"io"
 )
 
-// fixedWriter implements the io.Writer interface and intentially allows
+// fixedWriter implements the io.Writer interface and intentionally allows
 // testing of error paths by forcing short writes.
 type fixedWriter struct {
 	b   []byte
@@ -45,7 +45,7 @@ func newFixedWriter(max int) io.Writer {
 	return &fw
 }
 
-// fixedReader implements the io.Reader interface and intentially allows
+// fixedReader implements the io.Reader interface and intentionally allows
 // testing of error paths by forcing short reads.
 type fixedReader struct {
 	buf   []byte
@@ -69,7 +69,7 @@ func (fr *fixedReader) Read(p []byte) (n int, err error) {
 func newFixedReader(max int, buf []byte) io.Reader {
 	b := make([]byte, max)
 	if buf != nil {
-		copy(b[:], buf)
+		copy(b, buf)
 	}
 
 	iobuf := bytes.NewBuffer(b)

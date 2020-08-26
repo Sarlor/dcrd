@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015-2018 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -9,9 +9,9 @@ import (
 	"fmt"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/dcrutil"
-	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/database/v2"
+	"github.com/decred/dcrd/dcrutil/v3"
+	"github.com/decred/dcrd/txscript/v3"
 )
 
 // NextLotteryData returns the next tickets eligible for spending as SSGen
@@ -70,10 +70,6 @@ func (b *BlockChain) lotteryDataForBlock(hash *chainhash.Hash) ([]chainhash.Hash
 //
 // It is safe for concurrent access.
 func (b *BlockChain) LotteryDataForBlock(hash *chainhash.Hash) ([]chainhash.Hash, int, [6]byte, error) {
-	// TODO: An optimization can be added that only calls the read lock if the
-	// block is not minMemoryStakeNodes blocks before the current best node.
-	// This is because all the data for these nodes can be assumed to be
-	// in memory.
 	b.chainLock.Lock()
 	winningTickets, poolSize, finalState, err := b.lotteryDataForBlock(hash)
 	b.chainLock.Unlock()
@@ -82,7 +78,7 @@ func (b *BlockChain) LotteryDataForBlock(hash *chainhash.Hash) ([]chainhash.Hash
 
 // LiveTickets returns all currently live tickets from the stake database.
 //
-// This function is NOT safe for concurrent access.
+// This function is safe for concurrent access.
 func (b *BlockChain) LiveTickets() ([]chainhash.Hash, error) {
 	b.chainLock.RLock()
 	sn := b.bestChain.Tip().stakeNode
@@ -93,7 +89,7 @@ func (b *BlockChain) LiveTickets() ([]chainhash.Hash, error) {
 
 // MissedTickets returns all currently missed tickets from the stake database.
 //
-// This function is NOT safe for concurrent access.
+// This function is safe for concurrent access.
 func (b *BlockChain) MissedTickets() ([]chainhash.Hash, error) {
 	b.chainLock.RLock()
 	sn := b.bestChain.Tip().stakeNode
@@ -122,12 +118,12 @@ func (b *BlockChain) TicketsWithAddress(address dcrutil.Address) ([]chainhash.Ha
 			}
 
 			_, addrs, _, err :=
-				txscript.ExtractPkScriptAddrs(txscript.DefaultScriptVersion,
+				txscript.ExtractPkScriptAddrs(utxo.ScriptVersionByIndex(0),
 					utxo.PkScriptByIndex(0), b.chainParams)
 			if err != nil {
 				return err
 			}
-			if addrs[0].EncodeAddress() == address.EncodeAddress() {
+			if addrs[0].Address() == address.Address() {
 				ticketsWithAddr = append(ticketsWithAddr, hash)
 			}
 		}
@@ -152,8 +148,8 @@ func (b *BlockChain) CheckLiveTicket(hash chainhash.Hash) bool {
 	return sn.ExistsLiveTicket(hash)
 }
 
-// CheckLiveTickets returns whether or not a slice of tickets exist in the live
-// ticket treap of the best node.
+// CheckLiveTickets returns a slice of bools representing whether each ticket
+// exists in the live ticket treap of the best node.
 //
 // This function is safe for concurrent access.
 func (b *BlockChain) CheckLiveTickets(hashes []chainhash.Hash) []bool {

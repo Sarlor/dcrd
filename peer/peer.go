@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2016-2018 The Decred developers
+// Copyright (c) 2016-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,7 +7,6 @@ package peer
 
 import (
 	"bytes"
-	"container/list"
 	"errors"
 	"fmt"
 	"io"
@@ -18,17 +17,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/go-socks/socks"
 	"github.com/davecgh/go-spew/spew"
-	"github.com/decred/dcrd/blockchain"
-	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/lru"
 	"github.com/decred/dcrd/wire"
+	"github.com/decred/go-socks/socks"
+	"github.com/decred/slog"
 )
 
 const (
 	// MaxProtocolVersion is the max protocol version the peer supports.
-	MaxProtocolVersion = wire.NodeCFVersion
+	MaxProtocolVersion = wire.CFilterV2Version
 
 	// outputBufferSize is the number of elements the output channels use.
 	outputBufferSize = 5000
@@ -49,9 +48,6 @@ const (
 	// peer that hasn't completed the initial version negotiation.
 	negotiateTimeout = 30 * time.Second
 
-	// idleTimeout is the duration of inactivity before we time out a peer.
-	idleTimeout = 5 * time.Minute
-
 	// stallTickInterval is the interval of time between each check for
 	// stalled peers.
 	stallTickInterval = 15 * time.Second
@@ -65,6 +61,11 @@ const (
 	// trickleTimeout is the duration of the ticker which trickles down the
 	// inventory to a peer.
 	trickleTimeout = 500 * time.Millisecond
+
+	// defaultIdleTimeout is the default duration of inactivity before a peer is
+	// timed out when a peer is created with the idle timeout configuration
+	// option set to 0.
+	defaultIdleTimeout = 120 * time.Second
 )
 
 var (
@@ -78,7 +79,7 @@ var (
 
 	// sentNonces houses the unique nonces that are generated when pushing
 	// version messages that are used to detect self connections.
-	sentNonces = newLruNonceCache(50)
+	sentNonces = lru.NewCache(50)
 
 	// allowSelfConns is only used to allow the tests to bypass the self
 	// connection detecting and disconnect logic since they intentionally
@@ -128,6 +129,9 @@ type MessageListeners struct {
 	// OnCFilter is invoked when a peer receives a cfilter wire message.
 	OnCFilter func(p *Peer, msg *wire.MsgCFilter)
 
+	// OnCFilterV2 is invoked when a peer receives a cfilterv2 wire message.
+	OnCFilterV2 func(p *Peer, msg *wire.MsgCFilterV2)
+
 	// OnCFHeaders is invoked when a peer receives a cfheaders wire
 	// message.
 	OnCFHeaders func(p *Peer, msg *wire.MsgCFHeaders)
@@ -157,6 +161,10 @@ type MessageListeners struct {
 	// OnGetCFilter is invoked when a peer receives a getcfilter wire
 	// message.
 	OnGetCFilter func(p *Peer, msg *wire.MsgGetCFilter)
+
+	// OnGetCFilterV2 is invoked when a peer receives a getcfilterv2 wire
+	// message.
+	OnGetCFilterV2 func(p *Peer, msg *wire.MsgGetCFilterV2)
 
 	// OnGetCFHeaders is invoked when a peer receives a getcfheaders
 	// wire message.
@@ -210,12 +218,12 @@ type Config struct {
 	NewestBlock HashFunc
 
 	// HostToNetAddress returns the netaddress for the given host. This can be
-	// nil in  which case the host will be parsed as an IP address.
+	// nil in which case the host will be parsed as an IP address.
 	HostToNetAddress HostToNetAddrFunc
 
 	// Proxy indicates a proxy is being used for connections.  The only
 	// effect this has is to prevent leaking the tor proxy address, so it
-	// only needs to specified if using a tor proxy.
+	// only needs to be specified if using a tor proxy.
 	Proxy string
 
 	// UserAgentName specifies the user agent name to advertise.  It is
@@ -233,10 +241,10 @@ type Config struct {
 	// semantic alphabet [a-zA-Z0-9-].
 	UserAgentComments []string
 
-	// ChainParams identifies which chain parameters the peer is associated
-	// with.  It is highly recommended to specify this field, however it can
-	// be omitted in which case the test network will be used.
-	ChainParams *chaincfg.Params
+	// Net identifies the network the peer is associated with.  It is
+	// highly recommended to specify this field, but it can be omitted in
+	// which case the test network will be used.
+	Net wire.CurrencyNet
 
 	// Services specifies which services to advertise as supported by the
 	// local peer.  This field can be omitted in which case it will be 0
@@ -255,6 +263,10 @@ type Config struct {
 	// Listeners houses callback functions to be invoked on receiving peer
 	// messages.
 	Listeners MessageListeners
+
+	// IdleTimeout is the duration of inactivity before a peer is timed
+	// out in seconds.
+	IdleTimeout time.Duration
 }
 
 // minUint32 is a helper function to return the minimum of two uint32s.
@@ -426,7 +438,7 @@ type Peer struct {
 	versionSent          bool
 	verAckReceived       bool
 
-	knownInventory     *lruInventoryCache
+	knownInventory     lru.Cache
 	prevGetBlocksMtx   sync.Mutex
 	prevGetBlocksBegin *chainhash.Hash
 	prevGetBlocksStop  *chainhash.Hash
@@ -470,6 +482,10 @@ func (p *Peer) String() string {
 // This function is safe for concurrent access.
 func (p *Peer) UpdateLastBlockHeight(newHeight int64) {
 	p.statsMtx.Lock()
+	if newHeight <= p.lastBlock {
+		p.statsMtx.Unlock()
+		return
+	}
 	log.Tracef("Updating last block height of peer %v from %v to %v",
 		p.addr, p.lastBlock, newHeight)
 	p.lastBlock = newHeight
@@ -494,6 +510,14 @@ func (p *Peer) UpdateLastAnnouncedBlock(blkHash *chainhash.Hash) {
 // This function is safe for concurrent access.
 func (p *Peer) AddKnownInventory(invVect *wire.InvVect) {
 	p.knownInventory.Add(invVect)
+}
+
+// IsKnownInventory returns whether the passed inventory already exists in
+// the known inventory for the peer.
+//
+// This function is safe for concurrent access.
+func (p *Peer) IsKnownInventory(invVect *wire.InvVect) bool {
+	return p.knownInventory.Contains(invVect)
 }
 
 // StatsSnapshot returns a snapshot of the current peer flags and statistics.
@@ -701,7 +725,7 @@ func (p *Peer) LastRecv() time.Time {
 
 // LocalAddr returns the local address of the connection.
 //
-// This function is safe fo concurrent access.
+// This function is safe for concurrent access.
 func (p *Peer) LocalAddr() net.Addr {
 	var localAddr net.Addr
 	if p.Connected() {
@@ -781,7 +805,6 @@ func (p *Peer) WantsHeaders() bool {
 //
 // This function is safe for concurrent access.
 func (p *Peer) PushAddrMsg(addresses []*wire.NetAddress) ([]*wire.NetAddress, error) {
-
 	// Nothing to send.
 	if len(addresses) == 0 {
 		return nil, nil
@@ -811,12 +834,12 @@ func (p *Peer) PushAddrMsg(addresses []*wire.NetAddress) ([]*wire.NetAddress, er
 // and stop hash.  It will ignore back-to-back duplicate requests.
 //
 // This function is safe for concurrent access.
-func (p *Peer) PushGetBlocksMsg(locator blockchain.BlockLocator, stopHash *chainhash.Hash) error {
+func (p *Peer) PushGetBlocksMsg(locator []chainhash.Hash, stopHash *chainhash.Hash) error {
 	// Extract the begin hash from the block locator, if one was specified,
 	// to use for filtering duplicate getblocks requests.
 	var beginHash *chainhash.Hash
 	if len(locator) > 0 {
-		beginHash = locator[0]
+		beginHash = &locator[0]
 	}
 
 	// Filter duplicate getblocks requests.
@@ -834,8 +857,8 @@ func (p *Peer) PushGetBlocksMsg(locator blockchain.BlockLocator, stopHash *chain
 
 	// Construct the getblocks request and queue it to be sent.
 	msg := wire.NewMsgGetBlocks(stopHash)
-	for _, hash := range locator {
-		err := msg.AddBlockLocatorHash(hash)
+	for i := range locator {
+		err := msg.AddBlockLocatorHash(&locator[i])
 		if err != nil {
 			return err
 		}
@@ -855,12 +878,12 @@ func (p *Peer) PushGetBlocksMsg(locator blockchain.BlockLocator, stopHash *chain
 // and stop hash.  It will ignore back-to-back duplicate requests.
 //
 // This function is safe for concurrent access.
-func (p *Peer) PushGetHeadersMsg(locator blockchain.BlockLocator, stopHash *chainhash.Hash) error {
+func (p *Peer) PushGetHeadersMsg(locator []chainhash.Hash, stopHash *chainhash.Hash) error {
 	// Extract the begin hash from the block locator, if one was specified,
 	// to use for filtering duplicate getheaders requests.
 	var beginHash *chainhash.Hash
 	if len(locator) > 0 {
-		beginHash = locator[0]
+		beginHash = &locator[0]
 	}
 
 	// Filter duplicate getheaders requests.
@@ -879,8 +902,8 @@ func (p *Peer) PushGetHeadersMsg(locator blockchain.BlockLocator, stopHash *chai
 	// Construct the getheaders request and queue it to be sent.
 	msg := wire.NewMsgGetHeaders()
 	msg.HashStop = *stopHash
-	for _, hash := range locator {
-		err := msg.AddBlockLocatorHash(hash)
+	for i := range locator {
+		err := msg.AddBlockLocatorHash(&locator[i])
 		if err != nil {
 			return err
 		}
@@ -958,8 +981,12 @@ func (p *Peer) handlePongMsg(msg *wire.MsgPong) {
 
 // readMessage reads the next wire message from the peer with logging.
 func (p *Peer) readMessage() (wire.Message, []byte, error) {
+	err := p.conn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout))
+	if err != nil {
+		return nil, nil, err
+	}
 	n, msg, buf, err := wire.ReadMessageN(p.conn, p.ProtocolVersion(),
-		p.cfg.ChainParams.Net)
+		p.cfg.Net)
 	atomic.AddUint64(&p.bytesReceived, uint64(n))
 	if p.cfg.Listeners.OnRead != nil {
 		p.cfg.Listeners.OnRead(p, n, msg, err)
@@ -968,23 +995,19 @@ func (p *Peer) readMessage() (wire.Message, []byte, error) {
 		return nil, nil, err
 	}
 
-	// Use closures to log expensive operations so they are only run when
-	// the logging level requires it.
-	log.Debugf("%v", newLogClosure(func() string {
+	// Only construct expensive log strings when the logging level requires it.
+	if log.Level() <= slog.LevelDebug {
 		// Debug summary of message.
 		summary := messageSummary(msg)
 		if len(summary) > 0 {
 			summary = " (" + summary + ")"
 		}
-		return fmt.Sprintf("Received %v%s from %s",
-			msg.Command(), summary, p)
-	}))
-	log.Tracef("%v", newLogClosure(func() string {
-		return spew.Sdump(msg)
-	}))
-	log.Tracef("%v", newLogClosure(func() string {
-		return spew.Sdump(buf)
-	}))
+		log.Debugf("Received %s%s from %s", msg.Command(), summary, p)
+	}
+	if log.Level() <= slog.LevelTrace {
+		log.Trace(spew.Sdump(msg))
+		log.Trace(spew.Sdump(buf))
+	}
 
 	return msg, buf, nil
 }
@@ -996,33 +1019,27 @@ func (p *Peer) writeMessage(msg wire.Message) error {
 		return nil
 	}
 
-	// Use closures to log expensive operations so they are only run when
-	// the logging level requires it.
-	log.Debugf("%v", newLogClosure(func() string {
+	// Only construct expensive log strings when the logging level requires it.
+	if log.Level() <= slog.LevelDebug {
 		// Debug summary of message.
 		summary := messageSummary(msg)
 		if len(summary) > 0 {
 			summary = " (" + summary + ")"
 		}
-		return fmt.Sprintf("Sending %v%s to %s", msg.Command(),
-			summary, p)
-	}))
-	log.Tracef("%v", newLogClosure(func() string {
-		return spew.Sdump(msg)
-	}))
-	log.Tracef("%v", newLogClosure(func() string {
+		log.Debugf("Sending %v%s to %s", msg.Command(), summary, p)
+	}
+	if log.Level() <= slog.LevelTrace {
+		log.Trace(spew.Sdump(msg))
+
 		var buf bytes.Buffer
-		err := wire.WriteMessage(&buf, msg, p.ProtocolVersion(),
-			p.cfg.ChainParams.Net)
-		if err != nil {
-			return err.Error()
+		err := wire.WriteMessage(&buf, msg, p.ProtocolVersion(), p.cfg.Net)
+		if err == nil {
+			log.Trace(spew.Sdump(buf.Bytes()))
 		}
-		return spew.Sdump(buf.Bytes())
-	}))
+	}
 
 	// Write the message to the peer.
-	n, err := wire.WriteMessageN(p.conn, msg, p.ProtocolVersion(),
-		p.cfg.ChainParams.Net)
+	n, err := wire.WriteMessageN(p.conn, msg, p.ProtocolVersion(), p.cfg.Net)
 	atomic.AddUint64(&p.bytesSent, uint64(n))
 	if p.cfg.Listeners.OnWrite != nil {
 		p.cfg.Listeners.OnWrite(p, n, msg, err)
@@ -1045,7 +1062,10 @@ func (p *Peer) shouldHandleReadError(err error) bool {
 	if err == io.EOF {
 		return false
 	}
-	if opErr, ok := err.(*net.OpError); ok && !opErr.Temporary() {
+
+	// Handle all temporary network errors besides timeout errors.
+	if opErr, ok := err.(*net.OpError); ok &&
+		(!opErr.Temporary() || opErr.Timeout()) {
 		return false
 	}
 
@@ -1058,7 +1078,7 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msgCmd st
 	// Setup a deadline for each message being sent that expects a response.
 	//
 	// NOTE: Pings are intentionally ignored here since they are typically
-	// sent asynchronously and as a result of a long backlock of messages,
+	// sent asynchronously and as a result of a long backlog of messages,
 	// such as is typical in the case of initial block download, the
 	// response won't be received in time.
 	log.Debugf("Adding deadline for command %s for peer %s", msgCmd, p.addr)
@@ -1151,7 +1171,7 @@ out:
 				}
 
 			case sccHandlerStart:
-				// Warn on unbalanced callback signalling.
+				// Warn on unbalanced callback signaling.
 				if handlerActive {
 					log.Warn("Received handler start " +
 						"control command while a " +
@@ -1163,7 +1183,7 @@ out:
 				handlersStartTime = time.Now()
 
 			case sccHandlerDone:
-				// Warn on unbalanced callback signalling.
+				// Warn on unbalanced callback signaling.
 				if !handlerActive {
 					log.Warn("Received handler done " +
 						"control command when a " +
@@ -1195,6 +1215,10 @@ out:
 			// Disconnect the peer if any of the pending responses
 			// don't arrive by their adjusted deadline.
 			for command, deadline := range pendingResponses {
+				if command == wire.CmdMiningState {
+					continue
+				}
+
 				if now.Before(deadline.Add(offset)) {
 					log.Debugf("Stall ticker rolling over for peer %s on "+
 						"cmd %s (deadline for data: %s)", p, command,
@@ -1202,12 +1226,10 @@ out:
 					continue
 				}
 
-				if command != wire.CmdMiningState {
-					log.Infof("Peer %s appears to be stalled or "+
-						"misbehaving, %s timeout -- "+
-						"disconnecting", p, command)
-					p.Disconnect()
-				}
+				log.Infof("Peer %s appears to be stalled or "+
+					"misbehaving, %s timeout -- "+
+					"disconnecting", p, command)
+				p.Disconnect()
 				break
 			}
 
@@ -1248,21 +1270,12 @@ cleanup:
 // inHandler handles all incoming messages for the peer.  It must be run as a
 // goroutine.
 func (p *Peer) inHandler() {
-	// Peers must complete the initial version negotiation within a shorter
-	// timeframe than a general idle timeout.  The timer is then reset below
-	// to idleTimeout for all future messages.
-	idleTimer := time.AfterFunc(idleTimeout, func() {
-		log.Warnf("Peer %s no answer for %s -- disconnecting", p, idleTimeout)
-		p.Disconnect()
-	})
-
 out:
 	for atomic.LoadInt32(&p.disconnect) == 0 {
 		// Read a message and stop the idle timer as soon as the read
 		// is done.  The timer is reset below for the next iteration if
 		// needed.
 		rmsg, buf, err := p.readMessage()
-		idleTimer.Stop()
 		if err != nil {
 			// Only log the error and send reject message if the
 			// local peer is not forcibly disconnecting and the
@@ -1281,6 +1294,12 @@ out:
 				p.PushRejectMsg("malformed", wire.RejectMalformed, errMsg, nil,
 					true)
 			}
+
+			if nErr, ok := err.(net.Error); ok && nErr.Timeout() {
+				log.Warnf("Peer %s no answer for %s -- disconnecting",
+					p, p.cfg.IdleTimeout)
+			}
+
 			break out
 		}
 		atomic.StoreInt64(&p.lastRecv, time.Now().Unix())
@@ -1437,18 +1456,22 @@ out:
 				p.cfg.Listeners.OnSendHeaders(p, msg)
 			}
 
+		case *wire.MsgGetCFilterV2:
+			if p.cfg.Listeners.OnGetCFilterV2 != nil {
+				p.cfg.Listeners.OnGetCFilterV2(p, msg)
+			}
+
+		case *wire.MsgCFilterV2:
+			if p.cfg.Listeners.OnCFilterV2 != nil {
+				p.cfg.Listeners.OnCFilterV2(p, msg)
+			}
+
 		default:
 			log.Debugf("Received unhandled message of type %v "+
 				"from %v", rmsg.Command(), p)
 		}
 		p.stallControl <- stallControlMsg{sccHandlerDone, rmsg}
-
-		// A message was received so reset the idle timer.
-		idleTimer.Reset(idleTimeout)
 	}
-
-	// Ensure the idle timer is stopped to avoid leaking the resource.
-	idleTimer.Stop()
 
 	// Ensure connection is closed.
 	p.Disconnect()
@@ -1462,8 +1485,8 @@ out:
 // handlers will not block on us sending a message.  That data is then passed on
 // to outHandler to be actually written.
 func (p *Peer) queueHandler() {
-	pendingMsgs := list.New()
-	invSendQueue := list.New()
+	var pendingMsgs []outMsg
+	var invSendQueue []*wire.InvVect
 	trickleTicker := time.NewTicker(trickleTimeout)
 	defer trickleTicker.Stop()
 
@@ -1477,11 +1500,11 @@ func (p *Peer) queueHandler() {
 	waiting := false
 
 	// To avoid duplication below.
-	queuePacket := func(msg outMsg, list *list.List, waiting bool) bool {
+	queuePacket := func(msg outMsg, list *[]outMsg, waiting bool) bool {
 		if !waiting {
 			p.sendQueue <- msg
 		} else {
-			list.PushBack(msg)
+			*list = append(*list, msg)
 		}
 		// we are always waiting now.
 		return true
@@ -1490,28 +1513,28 @@ out:
 	for {
 		select {
 		case msg := <-p.outputQueue:
-			waiting = queuePacket(msg, pendingMsgs, waiting)
+			waiting = queuePacket(msg, &pendingMsgs, waiting)
 
 		// This channel is notified when a message has been sent across
 		// the network socket.
 		case <-p.sendDoneQueue:
 			// No longer waiting if there are no more messages
 			// in the pending messages queue.
-			next := pendingMsgs.Front()
-			if next == nil {
+			if len(pendingMsgs) == 0 {
 				waiting = false
 				continue
 			}
 
 			// Notify the outHandler about the next item to
 			// asynchronously send.
-			val := pendingMsgs.Remove(next)
-			p.sendQueue <- val.(outMsg)
+			next := pendingMsgs[0]
+			pendingMsgs = pendingMsgs[1:]
+			p.sendQueue <- next
 
 		case iv := <-p.outputInvChan:
 			// No handshake?  They'll find out soon enough.
 			if p.VersionKnown() {
-				invSendQueue.PushBack(iv)
+				invSendQueue = append(invSendQueue, iv)
 			}
 
 		case <-trickleTicker.C:
@@ -1519,19 +1542,18 @@ out:
 			// is no queued inventory.
 			// version is known if send queue has any entries.
 			if atomic.LoadInt32(&p.disconnect) != 0 ||
-				invSendQueue.Len() == 0 {
+				len(invSendQueue) == 0 {
 				continue
 			}
 
 			// Create and send as many inv messages as needed to
 			// drain the inventory send queue.
-			invMsg := wire.NewMsgInvSizeHint(uint(invSendQueue.Len()))
-			for e := invSendQueue.Front(); e != nil; e = invSendQueue.Front() {
-				iv := invSendQueue.Remove(e).(*wire.InvVect)
+			invMsg := wire.NewMsgInvSizeHint(uint(len(invSendQueue)))
 
+			for _, iv := range invSendQueue {
 				// Don't send inventory that became known after
 				// the initial check.
-				if p.knownInventory.Exists(iv) {
+				if p.knownInventory.Contains(iv) {
 					continue
 				}
 
@@ -1539,8 +1561,8 @@ out:
 				if len(invMsg.InvList) >= maxInvTrickleSize {
 					waiting = queuePacket(
 						outMsg{msg: invMsg},
-						pendingMsgs, waiting)
-					invMsg = wire.NewMsgInvSizeHint(uint(invSendQueue.Len()))
+						&pendingMsgs, waiting)
+					invMsg = wire.NewMsgInvSizeHint(uint(len(invSendQueue)))
 				}
 
 				// Add the inventory that is being relayed to
@@ -1549,8 +1571,9 @@ out:
 			}
 			if len(invMsg.InvList) > 0 {
 				waiting = queuePacket(outMsg{msg: invMsg},
-					pendingMsgs, waiting)
+					&pendingMsgs, waiting)
 			}
+			invSendQueue = nil
 
 		case <-p.quit:
 			break out
@@ -1559,9 +1582,7 @@ out:
 
 	// Drain any wait channels before we go away so we don't leave something
 	// waiting for us.
-	for e := pendingMsgs.Front(); e != nil; e = pendingMsgs.Front() {
-		val := pendingMsgs.Remove(e)
-		msg := val.(outMsg)
+	for _, msg := range pendingMsgs {
 		if msg.doneChan != nil {
 			msg.doneChan <- struct{}{}
 		}
@@ -1710,7 +1731,7 @@ func (p *Peer) QueueMessage(msg wire.Message, doneChan chan<- struct{}) {
 func (p *Peer) QueueInventory(invVect *wire.InvVect) {
 	// Don't add the inventory to the send queue if the peer is already
 	// known to have it.
-	if p.knownInventory.Exists(invVect) {
+	if p.knownInventory.Contains(invVect) {
 		return
 	}
 
@@ -1733,7 +1754,7 @@ func (p *Peer) QueueInventory(invVect *wire.InvVect) {
 // This function is safe for concurrent access.
 func (p *Peer) QueueInventoryImmediate(invVect *wire.InvVect) {
 	// Don't announce the inventory if the peer is already known to have it.
-	if p.knownInventory.Exists(invVect) {
+	if p.knownInventory.Contains(invVect) {
 		return
 	}
 
@@ -1796,7 +1817,7 @@ func (p *Peer) readRemoteVersionMsg() error {
 	}
 
 	// Detect self connections.
-	if !allowSelfConns && sentNonces.Exists(msg.Nonce) {
+	if !allowSelfConns && sentNonces.Contains(msg.Nonce) {
 		return errors.New("disconnecting peer connected to self")
 	}
 
@@ -2042,7 +2063,10 @@ func (p *Peer) WaitForDisconnect() {
 // newPeerBase returns a new base Decred peer based on the inbound flag.  This
 // is used by the NewInboundPeer and NewOutboundPeer functions to perform base
 // setup needed by both types of peers.
-func newPeerBase(cfg *Config, inbound bool) *Peer {
+func newPeerBase(cfgOrig *Config, inbound bool) *Peer {
+	// Copy to avoid mutating the caller and so the caller can't mutate.
+	cfg := *cfgOrig
+
 	// Default to the max supported protocol version.  Override to the
 	// version specified by the caller if configured.
 	protocolVersion := MaxProtocolVersion
@@ -2050,14 +2074,20 @@ func newPeerBase(cfg *Config, inbound bool) *Peer {
 		protocolVersion = cfg.ProtocolVersion
 	}
 
-	// Set the chain parameters to testnet if the caller did not specify any.
-	if cfg.ChainParams == nil {
-		cfg.ChainParams = &chaincfg.TestNet3Params
+	// Set the network if the caller did not specify one.  The default is
+	// testnet.
+	if cfg.Net == 0 {
+		cfg.Net = wire.TestNet3
+	}
+
+	// Set a default idle timeout if the caller did not specify one.
+	if cfg.IdleTimeout == 0 {
+		cfg.IdleTimeout = defaultIdleTimeout
 	}
 
 	p := Peer{
 		inbound:         inbound,
-		knownInventory:  newLruInventoryCache(maxKnownInventory),
+		knownInventory:  lru.NewCache(maxKnownInventory),
 		stallControl:    make(chan stallControlMsg, 1), // nonblocking sync
 		outputQueue:     make(chan outMsg, outputBufferSize),
 		sendQueue:       make(chan outMsg, 1),   // nonblocking sync
@@ -2067,7 +2097,7 @@ func newPeerBase(cfg *Config, inbound bool) *Peer {
 		queueQuit:       make(chan struct{}),
 		outQuit:         make(chan struct{}),
 		quit:            make(chan struct{}),
-		cfg:             *cfg, // Copy so caller can't mutate.
+		cfg:             cfg,
 		services:        cfg.Services,
 		protocolVersion: protocolVersion,
 	}

@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -9,26 +9,15 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/dcrutil"
-	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/dcrutil/v3"
+	"github.com/decred/dcrd/txscript/v3"
 )
 
 // CheckpointConfirmations is the number of blocks before the end of the current
 // best block chain that a good checkpoint candidate must be.
 const CheckpointConfirmations = 4096
-
-// DisableCheckpoints provides a mechanism to disable validation against
-// checkpoints which you DO NOT want to do in production.  It is provided only
-// for debug purposes.
-//
-// This function is safe for concurrent access.
-func (b *BlockChain) DisableCheckpoints(disable bool) {
-	b.chainLock.Lock()
-	b.noCheckpoints = disable
-	b.chainLock.Unlock()
-}
 
 // Checkpoints returns a slice of checkpoints (regardless of whether they are
 // already known).  When checkpoints are disabled or there are no checkpoints
@@ -36,28 +25,11 @@ func (b *BlockChain) DisableCheckpoints(disable bool) {
 //
 // This function is safe for concurrent access.
 func (b *BlockChain) Checkpoints() []chaincfg.Checkpoint {
-	b.chainLock.RLock()
-	defer b.chainLock.RUnlock()
-
-	if b.noCheckpoints || len(b.chainParams.Checkpoints) == 0 {
+	if len(b.checkpoints) == 0 {
 		return nil
 	}
 
-	return b.chainParams.Checkpoints
-}
-
-// latestCheckpoint returns the most recent checkpoint (regardless of whether it
-// is already known).  When checkpoints are disabled or there are no checkpoints
-// for the active network, it will return nil.
-//
-// This function MUST be called with the chain state lock held (for reads).
-func (b *BlockChain) latestCheckpoint() *chaincfg.Checkpoint {
-	if b.noCheckpoints || len(b.chainParams.Checkpoints) == 0 {
-		return nil
-	}
-
-	checkpoints := b.chainParams.Checkpoints
-	return &checkpoints[len(checkpoints)-1]
+	return b.checkpoints
 }
 
 // LatestCheckpoint returns the most recent checkpoint (regardless of whether it
@@ -66,10 +38,11 @@ func (b *BlockChain) latestCheckpoint() *chaincfg.Checkpoint {
 //
 // This function is safe for concurrent access.
 func (b *BlockChain) LatestCheckpoint() *chaincfg.Checkpoint {
-	b.chainLock.RLock()
-	checkpoint := b.latestCheckpoint()
-	b.chainLock.RUnlock()
-	return checkpoint
+	if len(b.checkpoints) == 0 {
+		return nil
+	}
+
+	return &b.checkpoints[len(b.checkpoints)-1]
 }
 
 // verifyCheckpoint returns whether the passed block height and hash combination
@@ -78,7 +51,7 @@ func (b *BlockChain) LatestCheckpoint() *chaincfg.Checkpoint {
 //
 // This function MUST be called with the chain lock held (for reads).
 func (b *BlockChain) verifyCheckpoint(height int64, hash *chainhash.Hash) bool {
-	if b.noCheckpoints || len(b.chainParams.Checkpoints) == 0 {
+	if len(b.checkpoints) == 0 {
 		return true
 	}
 
@@ -88,7 +61,7 @@ func (b *BlockChain) verifyCheckpoint(height int64, hash *chainhash.Hash) bool {
 		return true
 	}
 
-	if !checkpoint.Hash.IsEqual(hash) {
+	if *checkpoint.Hash != *hash {
 		return false
 	}
 
@@ -97,93 +70,27 @@ func (b *BlockChain) verifyCheckpoint(height int64, hash *chainhash.Hash) bool {
 	return true
 }
 
-// findPreviousCheckpoint finds the most recent checkpoint that is already
-// available in the downloaded portion of the block chain and returns the
-// associated block node.  It returns nil if a checkpoint can't be found (this
-// should really only happen for blocks before the first checkpoint).
-//
-// This function MUST be called with the chain lock held (for reads).
-func (b *BlockChain) findPreviousCheckpoint() (*blockNode, error) {
-	if b.noCheckpoints || len(b.chainParams.Checkpoints) == 0 {
-		return nil, nil
+// maybeUpdateMostRecentCheckpoint potentially updates the most recently known
+// checkpoint to the provided block node.
+func (b *BlockChain) maybeUpdateMostRecentCheckpoint(node *blockNode) {
+	if len(b.checkpoints) == 0 {
+		return
 	}
 
-	// Perform the initial search to find and cache the latest known
-	// checkpoint if the best chain is not known yet or we haven't already
-	// previously searched.
-	checkpoints := b.chainParams.Checkpoints
-	numCheckpoints := len(checkpoints)
-	if b.checkpointNode == nil && b.nextCheckpoint == nil {
-		// Loop backwards through the available checkpoints to find one
-		// that is already available.
-		for i := numCheckpoints - 1; i >= 0; i-- {
-			node := b.index.LookupNode(checkpoints[i].Hash)
-			if node == nil || !b.bestChain.Contains(node) {
-				continue
-			}
-
-			// Checkpoint found.  Cache it for future lookups and
-			// set the next expected checkpoint accordingly.
-			b.checkpointNode = node
-			if i < numCheckpoints-1 {
-				b.nextCheckpoint = &checkpoints[i+1]
-			}
-			return b.checkpointNode, nil
-		}
-
-		// No known latest checkpoint.  This will only happen on blocks
-		// before the first known checkpoint.  So, set the next expected
-		// checkpoint to the first checkpoint and return the fact there
-		// is no latest known checkpoint block.
-		b.nextCheckpoint = &checkpoints[0]
-		return nil, nil
+	// Nothing to update if there is no checkpoint data for the block height or
+	// the checkpoint hash does not match.
+	checkpoint, exists := b.checkpointsByHeight[node.height]
+	if !exists || node.hash != *checkpoint.Hash {
+		return
 	}
 
-	// At this point we've already searched for the latest known checkpoint,
-	// so when there is no next checkpoint, the current checkpoint lockin
-	// will always be the latest known checkpoint.
-	if b.nextCheckpoint == nil {
-		return b.checkpointNode, nil
+	// Update the previous checkpoint to current block so long as it is more
+	// recent than the existing previous checkpoint.
+	if b.checkpointNode == nil || b.checkpointNode.height < checkpoint.Height {
+		log.Debugf("Most recent checkpoint updated to %s (height %d)",
+			node.hash, node.height)
+		b.checkpointNode = node
 	}
-
-	// When there is a next checkpoint and the height of the current best
-	// chain does not exceed it, the current checkpoint lockin is still
-	// the latest known checkpoint.
-	if b.bestChain.Tip().height < b.nextCheckpoint.Height {
-		return b.checkpointNode, nil
-	}
-
-	// We've reached or exceeded the next checkpoint height.  Note that
-	// once a checkpoint lockin has been reached, forks are prevented from
-	// any blocks before the checkpoint, so we don't have to worry about the
-	// checkpoint going away out from under us due to a chain reorganize.
-
-	// Cache the latest known checkpoint for future lookups.  Note that if
-	// this lookup fails something is very wrong since the chain has already
-	// passed the checkpoint which was verified as accurate before inserting
-	// it.
-	checkpointNode := b.index.LookupNode(b.nextCheckpoint.Hash)
-	if checkpointNode == nil {
-		return nil, AssertError(fmt.Sprintf("findPreviousCheckpoint "+
-			"failed lookup of known good block node %s",
-			b.nextCheckpoint.Hash))
-	}
-	b.checkpointNode = checkpointNode
-
-	// Set the next expected checkpoint.
-	checkpointIndex := -1
-	for i := numCheckpoints - 1; i >= 0; i-- {
-		if checkpoints[i].Hash.IsEqual(b.nextCheckpoint.Hash) {
-			checkpointIndex = i
-			break
-		}
-	}
-	b.nextCheckpoint = nil
-	if checkpointIndex != -1 && checkpointIndex < numCheckpoints-1 {
-		b.nextCheckpoint = &checkpoints[checkpointIndex+1]
-	}
-
-	return b.checkpointNode, nil
 }
 
 // isNonstandardTransaction determines whether a transaction contains any
@@ -219,11 +126,6 @@ func isNonstandardTransaction(tx *dcrutil.Tx) bool {
 func (b *BlockChain) IsCheckpointCandidate(block *dcrutil.Block) (bool, error) {
 	b.chainLock.RLock()
 	defer b.chainLock.RUnlock()
-
-	// Checkpoints must be enabled.
-	if b.noCheckpoints {
-		return false, fmt.Errorf("checkpoints are disabled")
-	}
 
 	// A checkpoint must be in the main chain.
 	node := b.index.LookupNode(block.Hash())

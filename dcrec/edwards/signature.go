@@ -8,6 +8,8 @@ package edwards
 import (
 	"fmt"
 	"math/big"
+
+	"github.com/agl/ed25519"
 )
 
 // Signature is a type representing an ecdsa signature.
@@ -31,16 +33,37 @@ func NewSignature(r, s *big.Int) *Signature {
 //   sig[32:64] S, scalar multiplication/addition results = (ab+c) mod l
 //     encoded also as little endian
 func (sig Signature) Serialize() []byte {
-	rBytes := BigIntToEncodedBytes(sig.R)
-	sBytes := BigIntToEncodedBytes(sig.S)
+	rBytes := bigIntToEncodedBytes(sig.R)
+	sBytes := bigIntToEncodedBytes(sig.S)
 
 	all := append(rBytes[:], sBytes[:]...)
 
 	return all
 }
 
+// IsEqual compares this Signature instance to the one passed, returning true
+// if both Signatures are equivalent. A signature is equivalent to another, if
+// they both have the same scalar value for R and S.
+func (sig *Signature) IsEqual(otherSig *Signature) bool {
+	return sig.R.Cmp(otherSig.R) == 0 &&
+		sig.S.Cmp(otherSig.S) == 0
+}
+
+// Verify verifies a message 'hash' using the given public keys and signature.
+func (sig *Signature) Verify(hash []byte, pubKey *PublicKey) bool {
+	if pubKey == nil || hash == nil {
+		return false
+	}
+
+	pubBytes := pubKey.Serialize()
+	sigBytes := sig.Serialize()
+	pubArray := copyBytes(pubBytes)
+	sigArray := copyBytes64(sigBytes)
+	return ed25519.Verify(pubArray, hash, sigArray)
+}
+
 // parseSig is the default method of parsing a serialized Ed25519 signature.
-func parseSig(curve *TwistedEdwardsCurve, sigStr []byte, der bool) (*Signature, error) {
+func parseSig(sigStr []byte, der bool) (*Signature, error) {
 	if der {
 		return nil, fmt.Errorf("DER signatures not allowed in ed25519")
 	}
@@ -50,17 +73,18 @@ func parseSig(curve *TwistedEdwardsCurve, sigStr []byte, der bool) (*Signature, 
 			len(sigStr), SignatureSize)
 	}
 
+	curve := Edwards()
 	rBytes := copyBytes(sigStr[0:32])
-	r := EncodedBytesToBigInt(rBytes)
+	r := encodedBytesToBigInt(rBytes)
 	// r is a point on the curve as well. Evaluate it and make sure it's
 	// a valid point.
-	_, _, err := curve.EncodedBytesToBigIntPoint(rBytes)
+	_, _, err := curve.encodedBytesToBigIntPoint(rBytes)
 	if err != nil {
 		return nil, err
 	}
 
 	sBytes := copyBytes(sigStr[32:64])
-	s := EncodedBytesToBigInt(sBytes)
+	s := encodedBytesToBigInt(sBytes)
 	// s may not be zero or >= curve.N.
 	if s.Cmp(curve.N) >= 0 || s.Cmp(zero) == 0 {
 		return nil, fmt.Errorf("s scalar is empty or larger than the order of " +
@@ -71,15 +95,15 @@ func parseSig(curve *TwistedEdwardsCurve, sigStr []byte, der bool) (*Signature, 
 }
 
 // ParseSignature parses a signature in BER format for the curve type `curve'
-// into a Signature type, perfoming some basic sanity checks.
-func ParseSignature(curve *TwistedEdwardsCurve, sigStr []byte) (*Signature, error) {
-	return parseSig(curve, sigStr, false)
+// into a Signature type, performing some basic sanity checks.
+func ParseSignature(sigStr []byte) (*Signature, error) {
+	return parseSig(sigStr, false)
 }
 
 // ParseDERSignature offers a legacy function for plugging into Decred, which
 // is based off btcec.
-func ParseDERSignature(curve *TwistedEdwardsCurve, sigStr []byte) (*Signature, error) {
-	return parseSig(curve, sigStr, false)
+func ParseDERSignature(sigStr []byte) (*Signature, error) {
+	return parseSig(sigStr, false)
 }
 
 // RecoverCompact uses a signature and a hash to recover is private

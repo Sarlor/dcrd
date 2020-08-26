@@ -1,40 +1,39 @@
 // Copyright (c) 2016-2017 The btcsuite developers
 // Copyright (c) 2016-2017 The Lightning Network Developers
-// Copyright (c) 2018 The Decred developers
+// Copyright (c) 2018-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package gcs
 
 import (
+	"bytes"
 	"encoding/binary"
-	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"sync"
 
-	"github.com/dchest/blake256"
 	"github.com/dchest/siphash"
 	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/crypto/blake256"
+	"github.com/decred/dcrd/wire"
 )
 
-// Inspired by https://github.com/rasky/gcs
+// modReduceV1 is the reduction method used in version 1 filters and simply
+// consists of x mod N.
+func modReduceV1(x, N uint64) uint64 {
+	return x % N
+}
 
-var (
-	// ErrNTooBig signifies that the filter can't handle N items.
-	ErrNTooBig = errors.New("N does not fit in uint32")
-
-	// ErrPTooBig signifies that the filter can't handle `1/2**P`
-	// collision probability.
-	ErrPTooBig = errors.New("P is too large")
-
-	// ErrNoData signifies that an empty slice was passed.
-	ErrNoData = errors.New("no data provided")
-
-	// ErrMisserialized signifies a filter was misserialized and is missing the
-	// N and/or P parameters of a serialized filter.
-	ErrMisserialized = errors.New("misserialized filter")
-)
+// chooseReduceFunc chooses which reduction method to use based on the filter
+// version and returns the appropriate function to perform it.
+func chooseReduceFunc(version uint16) func(uint64, uint64) uint64 {
+	if version == 1 {
+		return modReduceV1
+	}
+	return fastReduce
+}
 
 // KeySize is the size of the byte array required for key material for the
 // SipHash keyed hash function.
@@ -47,209 +46,236 @@ func (s *uint64s) Len() int           { return len(*s) }
 func (s *uint64s) Less(i, j int) bool { return (*s)[i] < (*s)[j] }
 func (s *uint64s) Swap(i, j int)      { (*s)[i], (*s)[j] = (*s)[j], (*s)[i] }
 
-// Filter describes an immutable filter that can be built from a set of data
-// elements, serialized, deserialized, and queried in a thread-safe manner. The
-// serialized form is compressed as a Golomb Coded Set (GCS), but does not
-// include N or P to allow the user to encode the metadata separately if
-// necessary. The hash function used is SipHash, a keyed function; the key used
-// in building the filter is required in order to match filter values and is
-// not included in the serialized form.
-type Filter struct {
+// filter describes a versioned immutable filter that can be built from a set of
+// data elements, serialized, deserialized, and queried in a thread-safe manner.
+//
+// It is used internally to implement the exported filter version types.
+//
+// See FilterV1 and FilterV2 for more details.
+type filter struct {
+	version     uint16
 	n           uint32
-	p           uint8
-	modulusNP   uint64
-	filterNData []byte // 4 bytes n big endian, remainder is filter data
+	b           uint8
+	modulusNM   uint64
+	filterNData []byte
+	filterData  []byte // Slice into filterNData with raw filter bytes.
 }
 
-// NewFilter builds a new GCS filter with the collision probability of
-// `1/(2**P)`, key `key`, and including every `[]byte` in `data` as a member of
+// newFilter builds a new GCS filter with the specified version and provided
+// tunable parameters that contains every item of the passed data as a member of
 // the set.
-func NewFilter(P uint8, key [KeySize]byte, data [][]byte) (*Filter, error) {
-	// Some initial parameter checks: make sure we have data from which to
-	// build the filter, and make sure our parameters will fit the hash
-	// function we're using.
-	if len(data) == 0 {
-		return nil, ErrNoData
+//
+// B is the tunable bits parameter for constructing the filter that is used as
+// the bin size in the underlying Golomb coding with a value of 2^B.  The
+// optimal value of B to minimize the size of the filter for a given false
+// positive rate 1/M is floor(log_2(M) - 0.055256).  The maximum allowed value
+// for B is 32.
+//
+// M is the inverse of the target false positive rate for the filter.  The
+// optimal value of M to minimize the size of the filter for a given B is
+// ceil(1.497137 * 2^B).
+//
+// key is a key used in the SipHash function used to hash each data element
+// prior to inclusion in the filter.  This helps thwart would be attackers
+// attempting to choose elements that intentionally cause false positives.
+//
+// The general process for determining optimal parameters for B and M to
+// minimize the size of the filter is to start with the desired false positive
+// rate and calculate B per the aforementioned formula accordingly.  Then, if
+// the application permits the false positive rate to be varied, calculate the
+// optimal value of M via the formula provided under the description of M.
+//
+// NOTE: Since this function must only be used internally, it will panic if
+// called with a value of B greater than 32.
+func newFilter(version uint16, B uint8, M uint64, key [KeySize]byte, data [][]byte) (*filter, error) {
+	if B > 32 {
+		panic(fmt.Sprintf("B value of %d is greater than max allowed 32", B))
 	}
-	if len(data) > math.MaxInt32 {
-		return nil, ErrNTooBig
-	}
-	if P > 32 {
-		return nil, ErrPTooBig
+	switch version {
+	case 1, 2:
+	default:
+		panic(fmt.Sprintf("version %d filters are not supported", version))
 	}
 
-	// Create the filter object and insert metadata.
-	modP := uint64(1 << P)
-	modPMask := modP - 1
-	f := Filter{
-		n:         uint32(len(data)),
-		p:         P,
-		modulusNP: uint64(len(data)) * modP,
+	// Note that some of the entries might end up hashing to duplicates and
+	// being removed below, so it is important to perform this check on the
+	// raw data to maintain consensus.
+	numEntries := uint64(len(data))
+	if numEntries > math.MaxInt32 {
+		str := fmt.Sprintf("unable to create filter with %d entries greater "+
+			"than max allowed %d", len(data), math.MaxInt32)
+		return nil, makeError(ErrNTooBig, str)
 	}
 
-	// Allocate filter data.
-	values := make([]uint64, 0, len(data))
-
-	// Insert the hash (modulo N*P) of each data element into a slice and
-	// sort the slice.
+	// Insert the hash of each data element into a slice while removing any
+	// duplicates in the data for filters after version 1.
 	k0 := binary.LittleEndian.Uint64(key[0:8])
 	k1 := binary.LittleEndian.Uint64(key[8:16])
-	for _, d := range data {
-		v := siphash.Hash(k0, k1, d) % f.modulusNP
-		values = append(values, v)
+	values := make([]uint64, 0, numEntries)
+	switch {
+	case version == 1:
+		for _, d := range data {
+			v := siphash.Hash(k0, k1, d)
+			values = append(values, v)
+		}
+
+	case version > 1:
+		seen := make(map[uint64]struct{}, numEntries*2)
+		for _, d := range data {
+			if len(d) == 0 {
+				continue
+			}
+			v := siphash.Hash(k0, k1, d)
+			if _, ok := seen[v]; ok {
+				continue
+			}
+			seen[v] = struct{}{}
+			values = append(values, v)
+		}
+	}
+	numEntries = uint64(len(values))
+
+	// Create the filter object and insert metadata.
+	modBMask := uint64(1<<B) - 1
+	f := filter{
+		version:   version,
+		n:         uint32(numEntries),
+		b:         B,
+		modulusNM: numEntries * M,
+	}
+
+	// Nothing to do for an empty filter.
+	if len(values) == 0 {
+		return &f, nil
+	}
+
+	// Reduce the hash of each data element to the range [0,N*M) and sort it.
+	reduceFn := chooseReduceFunc(version)
+	for i, v := range values {
+		values[i] = reduceFn(v, f.modulusNM)
 	}
 	sort.Sort((*uint64s)(&values))
 
+	// Every entry will have f.b bits for the remainder portion and a quotient
+	// that is expected to be 1 on average with an exponentially decreasing
+	// probability for each subsequent value with reasonably optimal parameters.
+	// A quotient of 1 takes 2 bits in unary to encode and a quotient of 2 takes
+	// 3 bits.  Since the first two terms dominate, a reasonable expected size
+	// in bytes is:
+	//   (NB + 2N/2 + 3N/2) / 8
 	var b bitWriter
+	sizeHint := (numEntries*uint64(f.b) + numEntries + 3*numEntries>>1) >> 3
+	b.bytes = make([]byte, 0, sizeHint)
 
-	// Write the sorted list of values into the filter bitstream,
-	// compressing it using Golomb coding.
-	var value, lastValue, remainder uint64
+	// Write the sorted list of values into the filter bitstream using Golomb
+	// coding.
+	var quotient, prevValue, remainder uint64
 	for _, v := range values {
-		// Calculate the difference between this value and the last,
-		// modulo P.
-		remainder = (v - lastValue) & modPMask
+		delta := v - prevValue
+		prevValue = v
 
-		// Calculate the difference between this value and the last,
-		// divided by P.
-		value = (v - lastValue - remainder) >> f.p
-		lastValue = v
+		// Calculate the remainder of the difference between this value and the
+		// previous when dividing by 2^B.
+		//
+		// r = d % 2^B
+		remainder = delta & modBMask
 
-		// Write the P multiple into the bitstream in unary; the
-		// average should be around 1 (2 bits - 0b10).
-		for value > 0 {
+		// Calculate the quotient of the difference between this value and the
+		// previous when dividing by 2^B.
+		//
+		// q = floor(d / 2^B)
+		quotient = (delta - remainder) >> f.b
+
+		// Write the quotient into the bitstream in unary.  The average value
+		// will be around 1 for reasonably optimal parameters (which is encoded
+		// as 2 bits - 0b10).
+		for quotient > 0 {
 			b.writeOne()
-			value--
+			quotient--
 		}
 		b.writeZero()
 
-		// Write the remainder as a big-endian integer with enough bits
-		// to represent the appropriate collision probability.
-		b.writeNBits(remainder, uint(f.p))
+		// Write the remainder into the bitstream as a big-endian integer with
+		// B bits.  Note that Golomb coding typically uses truncated binary
+		// encoding in order to support arbitrary bin sizes, however, since 2^B
+		// is necessarily fixed to a power of 2, it is equivalent to a regular
+		// binary code.
+		b.writeNBits(remainder, uint(f.b))
 	}
 
-	// Save the filter data internally as n + filter bytes
-	ndata := make([]byte, 4+len(b.bytes))
-	binary.BigEndian.PutUint32(ndata, f.n)
-	copy(ndata[4:], b.bytes)
-	f.filterNData = ndata
+	// Save the filter data internally as n + filter bytes along with the raw
+	// filter data as a slice into it.
+	switch version {
+	case 1:
+		ndata := make([]byte, 4+len(b.bytes))
+		binary.BigEndian.PutUint32(ndata, f.n)
+		copy(ndata[4:], b.bytes)
+		f.filterNData = ndata
+		f.filterData = ndata[4:]
+
+	case 2:
+		var buf bytes.Buffer
+		nSize := wire.VarIntSerializeSize(uint64(f.n))
+		buf.Grow(nSize + len(b.bytes))
+
+		// The errors are ignored here since they can't realistically fail due
+		// to writing into an allocated buffer.
+		_ = wire.WriteVarInt(&buf, 0, uint64(f.n))
+		_, _ = buf.Write(b.bytes)
+		f.filterNData = buf.Bytes()
+		f.filterData = f.filterNData[nSize:]
+	}
 
 	return &f, nil
 }
 
-// FromBytes deserializes a GCS filter from a known N, P, and serialized filter
-// as returned by Bytes().
-func FromBytes(N uint32, P uint8, d []byte) (*Filter, error) {
-	// Basic sanity check.
-	if P > 32 {
-		return nil, ErrPTooBig
-	}
-
-	// Save the filter data internally as n + filter bytes
-	ndata := make([]byte, 4+len(d))
-	binary.BigEndian.PutUint32(ndata, N)
-	copy(ndata[4:], d)
-
-	f := &Filter{
-		n:           N,
-		p:           P,
-		modulusNP:   uint64(N) * uint64(1<<P),
-		filterNData: ndata,
-	}
-	return f, nil
-}
-
-// FromNBytes deserializes a GCS filter from a known P, and serialized N and
-// filter as returned by NBytes().
-func FromNBytes(P uint8, d []byte) (*Filter, error) {
-	if len(d) < 4 {
-		return nil, ErrMisserialized
-	}
-
-	n := binary.BigEndian.Uint32(d[:4])
-	f := &Filter{
-		n:           n,
-		p:           P,
-		modulusNP:   uint64(n) * uint64(1<<P),
-		filterNData: d,
-	}
-	return f, nil
-}
-
-// FromPBytes deserializes a GCS filter from a known N, and serialized P and
-// filter as returned by NBytes().
-func FromPBytes(N uint32, d []byte) (*Filter, error) {
-	if len(d) < 1 {
-		return nil, ErrMisserialized
-	}
-	return FromBytes(N, d[0], d[1:])
-}
-
-// FromNPBytes deserializes a GCS filter from a serialized N, P, and filter as
-// returned by NPBytes().
-func FromNPBytes(d []byte) (*Filter, error) {
-	if len(d) < 5 {
-		return nil, ErrMisserialized
-	}
-	return FromBytes(binary.BigEndian.Uint32(d[:4]), d[4], d[5:])
-}
-
-// Bytes returns the serialized format of the GCS filter, which does not
-// include N or P (returned by separate methods) or the key used by SipHash.
-func (f *Filter) Bytes() []byte {
-	return f.filterNData[4:]
-}
-
-// NBytes returns the serialized format of the GCS filter with N, which does
-// not include P (returned by a separate method) or the key used by SipHash.
-func (f *Filter) NBytes() []byte {
+// Bytes returns the serialized format of the GCS filter which includes N, but
+// does not include other parameters such as the false positive rate or the key.
+func (f *filter) Bytes() []byte {
 	return f.filterNData
 }
 
-// PBytes returns the serialized format of the GCS filter with P, which does
-// not include N (returned by a separate method) or the key used by SipHash.
-func (f *Filter) PBytes() []byte {
-	filterData := make([]byte, len(f.filterNData)-3)
-	filterData[0] = f.p
-	copy(filterData[1:], f.filterNData[4:])
-	return filterData
-}
-
-// NPBytes returns the serialized format of the GCS filter with N and P, which
-// does not include the key used by SipHash.
-func (f *Filter) NPBytes() []byte {
-	filterData := make([]byte, len(f.filterNData)+1)
-	copy(filterData[:4], f.filterNData)
-	filterData[4] = f.p
-	copy(filterData[5:], f.filterNData[4:])
-	return filterData
-}
-
-// P returns the filter's collision probability as a negative power of 2 (that
-// is, a collision probability of `1/2**20` is represented as 20).
-func (f *Filter) P() uint8 {
-	return f.p
-}
-
 // N returns the size of the data set used to build the filter.
-func (f *Filter) N() uint32 {
+func (f *filter) N() uint32 {
 	return f.n
+}
+
+// readFullUint64 reads a value represented by the sum of a unary multiple of
+// the Golomb coding bin size (2^B) and a big-endian B-bit remainder.
+func (f *filter) readFullUint64(b *bitReader) (uint64, error) {
+	v, err := b.readUnary()
+	if err != nil {
+		return 0, err
+	}
+
+	rem, err := b.readNBits(uint(f.b))
+	if err != nil {
+		return 0, err
+	}
+
+	// Add the multiple and the remainder.
+	return v<<f.b + rem, nil
 }
 
 // Match checks whether a []byte value is likely (within collision probability)
 // to be a member of the set represented by the filter.
-func (f *Filter) Match(key [KeySize]byte, data []byte) bool {
-	// Create a filter bitstream.
-	b := newBitReader(f.filterNData[4:])
+func (f *filter) Match(key [KeySize]byte, data []byte) bool {
+	// An empty filter or empty data can't possibly match anything.
+	if len(f.filterData) == 0 || len(data) == 0 {
+		return false
+	}
 
-	// Hash our search term with the same parameters as the filter.
+	// Hash the search term with the same parameters as the filter.
+	reduceFn := chooseReduceFunc(f.version)
 	k0 := binary.LittleEndian.Uint64(key[0:8])
 	k1 := binary.LittleEndian.Uint64(key[8:16])
-	term := siphash.Hash(k0, k1, data) % f.modulusNP
+	term := siphash.Hash(k0, k1, data)
+	term = reduceFn(term, f.modulusNM)
 
 	// Go through the search filter and look for the desired value.
+	b := newBitReader(f.filterData)
 	var lastValue uint64
-	for lastValue < term {
+	for lastValue <= term {
 		// Read the difference between previous and new value from
 		// bitstream.
 		value, err := f.readFullUint64(&b)
@@ -275,15 +301,14 @@ var matchPool sync.Pool
 // MatchAny checks whether any []byte value is likely (within collision
 // probability) to be a member of the set represented by the filter faster than
 // calling Match() for each value individually.
-func (f *Filter) MatchAny(key [KeySize]byte, data [][]byte) bool {
-	if len(data) == 0 {
+func (f *filter) MatchAny(key [KeySize]byte, data [][]byte) bool {
+	// An empty filter or empty data can't possibly match anything.
+	if len(f.filterData) == 0 || len(data) == 0 {
 		return false
 	}
 
-	// Create a filter bitstream.
-	b := newBitReader(f.filterNData[4:])
-
 	// Create an uncompressed filter of the search values.
+	reduceFn := chooseReduceFunc(f.version)
 	var values *[]uint64
 	if v := matchPool.Get(); v != nil {
 		values = v.(*[]uint64)
@@ -296,88 +321,231 @@ func (f *Filter) MatchAny(key [KeySize]byte, data [][]byte) bool {
 	k0 := binary.LittleEndian.Uint64(key[0:8])
 	k1 := binary.LittleEndian.Uint64(key[8:16])
 	for _, d := range data {
-		v := siphash.Hash(k0, k1, d) % f.modulusNP
+		if len(d) == 0 {
+			continue
+		}
+		v := siphash.Hash(k0, k1, d)
+		v = reduceFn(v, f.modulusNM)
 		*values = append(*values, v)
+	}
+	if len(*values) == 0 {
+		return false
 	}
 	sort.Sort((*uint64s)(values))
 
 	// Zip down the filters, comparing values until we either run out of
 	// values to compare in one of the filters or we reach a matching
 	// value.
-	var lastValue1, lastValue2 uint64
-	lastValue2 = (*values)[0]
-	i := 1
-	for lastValue1 != lastValue2 {
-		// Check which filter to advance to make sure we're comparing
-		// the right values.
-		switch {
-		case lastValue1 > lastValue2:
-			// Advance filter created from search terms or return
-			// false if we're at the end because nothing matched.
-			if i < len(*values) {
-				lastValue2 = (*values)[i]
-				i++
-			} else {
-				return false
-			}
-		case lastValue2 > lastValue1:
-			// Advance filter we're searching or return false if
-			// we're at the end because nothing matched.
-			value, err := f.readFullUint64(&b)
-			if err != nil {
-				return false
-			}
-			lastValue1 += value
+	b := newBitReader(f.filterData)
+	searchSize := len(data)
+	var searchIdx int
+	var filterVal uint64
+nextFilterVal:
+	for i := uint32(0); i < f.n; i++ {
+		// Read the next item to compare from the filter.
+		delta, err := f.readFullUint64(&b)
+		if err != nil {
+			return false
 		}
+		filterVal += delta
+
+		// Iterate through the values to search until either a match is found
+		// or the search value exceeds the current filter value.
+		for ; searchIdx < searchSize; searchIdx++ {
+			searchVal := (*values)[searchIdx]
+			if searchVal == filterVal {
+				return true
+			}
+
+			// Move to the next filter item once the current search value
+			// exceeds it.
+			if searchVal > filterVal {
+				continue nextFilterVal
+			}
+		}
+
+		// Exit early when there are no more values to search for.
+		break
 	}
 
-	// If we've made it this far, an element matched between filters so we
-	// return true.
-	return true
-}
-
-// readFullUint64 reads a value represented by the sum of a unary multiple of
-// the filter's P modulus (`2**P`) and a big-endian P-bit remainder.
-func (f *Filter) readFullUint64(b *bitReader) (uint64, error) {
-	v, err := b.readUnary()
-	if err != nil {
-		return 0, err
-	}
-
-	rem, err := b.readNBits(uint(f.p))
-	if err != nil {
-		return 0, err
-	}
-
-	// Add the multiple and the remainder.
-	return v<<f.p + rem, nil
+	return false
 }
 
 // Hash returns the BLAKE256 hash of the filter.
-func (f *Filter) Hash() chainhash.Hash {
-	h := blake256.New()
-	h.Write(f.filterNData)
+func (f *filter) Hash() chainhash.Hash {
+	// Empty filters have a hash of all zeroes.
+	if len(f.filterNData) == 0 {
+		return chainhash.Hash{}
+	}
 
-	var hash chainhash.Hash
-	copy(hash[:], h.Sum(nil))
-	return hash
+	return chainhash.Hash(blake256.Sum256(f.filterNData))
+}
+
+// FilterV1 describes an immutable filter that can be built from a set of data
+// elements, serialized, deserialized, and queried in a thread-safe manner.  The
+// serialized form is compressed as a Golomb Coded Set (GCS) along with the
+// number of members of the set.  The hash function used is SipHash, a keyed
+// function.  The key used in building the filter is required in order to match
+// filter values and is not included in the serialized form.
+type FilterV1 struct {
+	filter
+}
+
+// P returns the filter's collision probability as a negative power of 2.  For
+// example, a collision probability of 1 / 2^20 is represented as 20.
+func (f *FilterV1) P() uint8 {
+	return f.b
+}
+
+// NewFilterV1 builds a new version 1 GCS filter with a collision probability of
+// 1 / 2^P for the given key and data.
+func NewFilterV1(P uint8, key [KeySize]byte, data [][]byte) (*FilterV1, error) {
+	// Basic sanity check.
+	if P > 32 {
+		str := fmt.Sprintf("P value of %d is greater than max allowed 32", P)
+		return nil, makeError(ErrPTooBig, str)
+	}
+
+	filter, err := newFilter(1, P, 1<<P, key, data)
+	if err != nil {
+		return nil, err
+	}
+	return &FilterV1{filter: *filter}, nil
+}
+
+// FromBytesV1 deserializes a version 1 GCS filter from a known P and serialized
+// filter as returned by Bytes().
+func FromBytesV1(P uint8, d []byte) (*FilterV1, error) {
+	// Basic sanity check.
+	if P > 32 {
+		str := fmt.Sprintf("P value of %d is greater than max allowed 32", P)
+		return nil, makeError(ErrPTooBig, str)
+	}
+
+	var n uint32
+	var filterData []byte
+	if len(d) >= 4 {
+		n = binary.BigEndian.Uint32(d[:4])
+		filterData = d[4:]
+	} else if len(d) < 4 && len(d) != 0 {
+		str := "number of items serialization missing"
+		return nil, makeError(ErrMisserialized, str)
+	}
+
+	f := filter{
+		version:     1,
+		n:           n,
+		b:           P,
+		modulusNM:   uint64(n) * uint64(1<<P),
+		filterNData: d,
+		filterData:  filterData,
+	}
+	return &FilterV1{filter: f}, nil
+}
+
+// FilterV2 describes an immutable filter that can be built from a set of data
+// elements, serialized, deserialized, and queried in a thread-safe manner.  The
+// serialized form is compressed as a Golomb Coded Set (GCS) along with the
+// number of members of the set.  The hash function used is SipHash, a keyed
+// function.  The key used in building the filter is required in order to match
+// filter values and is not included in the serialized form.
+//
+// Version 2 filters differ from version 1 filters in four ways:
+//
+// 1) Support for independently specifying the false positive rate and Golomb
+//    coding bin size which allows minimizing the filter size
+// 2) A faster (incompatible with version 1) reduction function
+// 3) A more compact serialization for the number of members in the set
+// 4) Deduplication of all hash collisions prior to reducing and serializing the
+//    deltas
+type FilterV2 struct {
+	filter
+}
+
+// B returns the tunable bits parameter that was used to construct the filter.
+// It represents the bin size in the underlying Golomb coding with a value of
+// 2^B.
+func (f *FilterV2) B() uint8 {
+	return f.b
+}
+
+// NewFilterV2 builds a new GCS filter with the provided tunable parameters that
+// contains every item of the passed data as a member of the set.
+//
+// B is the tunable bits parameter for constructing the filter that is used as
+// the bin size in the underlying Golomb coding with a value of 2^B.  The
+// optimal value of B to minimize the size of the filter for a given false
+// positive rate 1/M is floor(log_2(M) - 0.055256).  The maximum allowed value
+// for B is 32.  An error will be returned for larger values.
+//
+// M is the inverse of the target false positive rate for the filter.  The
+// optimal value of M to minimize the size of the filter for a given B is
+// ceil(1.497137 * 2^B).
+//
+// key is a key used in the SipHash function used to hash each data element
+// prior to inclusion in the filter.  This helps thwart would be attackers
+// attempting to choose elements that intentionally cause false positives.
+//
+// The general process for determining optimal parameters for B and M to
+// minimize the size of the filter is to start with the desired false positive
+// rate and calculate B per the aforementioned formula accordingly.  Then, if
+// the application permits the false positive rate to be varied, calculate the
+// optimal value of M via the formula provided under the description of M.
+func NewFilterV2(B uint8, M uint64, key [KeySize]byte, data [][]byte) (*FilterV2, error) {
+	// Basic sanity check.
+	if B > 32 {
+		str := fmt.Sprintf("B value of %d is greater than max allowed 32", B)
+		return nil, makeError(ErrBTooBig, str)
+	}
+
+	filter, err := newFilter(2, B, M, key, data)
+	if err != nil {
+		return nil, err
+	}
+	return &FilterV2{filter: *filter}, nil
+}
+
+// FromBytesV2 deserializes a version 2 GCS filter from a known B, M, and
+// serialized filter as returned by Bytes().
+func FromBytesV2(B uint8, M uint64, d []byte) (*FilterV2, error) {
+	if B > 32 {
+		str := fmt.Sprintf("B value of %d is greater than max allowed 32", B)
+		return nil, makeError(ErrBTooBig, str)
+	}
+
+	var n uint64
+	var filterData []byte
+	if len(d) > 0 {
+		var err error
+		n, err = wire.ReadVarInt(bytes.NewReader(d), 0)
+		if err != nil {
+			str := fmt.Sprintf("failed to read number of filter items: %v", err)
+			return nil, makeError(ErrMisserialized, str)
+		}
+		filterData = d[wire.VarIntSerializeSize(n):]
+	}
+
+	f := filter{
+		version:     2,
+		n:           uint32(n),
+		b:           B,
+		modulusNM:   n * M,
+		filterNData: d,
+		filterData:  filterData,
+	}
+	return &FilterV2{filter: f}, nil
 }
 
 // MakeHeaderForFilter makes a filter chain header for a filter, given the
 // filter and the previous filter chain header.
-func MakeHeaderForFilter(filter *Filter, prevHeader *chainhash.Hash) chainhash.Hash {
-	filterTip := make([]byte, 2*chainhash.HashSize)
-	filterHash := filter.Hash()
-
+func MakeHeaderForFilter(filter *FilterV1, prevHeader *chainhash.Hash) chainhash.Hash {
 	// In the buffer we created above we'll compute hash || prevHash as an
 	// intermediate value.
-	copy(filterTip, filterHash[:])
+	var filterTip [2 * chainhash.HashSize]byte
+	filterHash := filter.Hash()
+	copy(filterTip[:], filterHash[:])
 	copy(filterTip[chainhash.HashSize:], prevHeader[:])
 
 	// The final filter hash is the blake256 of the hash computed above.
-	h := blake256.New()
-	h.Write(filterTip)
-	var hash chainhash.Hash
-	copy(hash[:], h.Sum(nil))
-	return hash
+	return chainhash.Hash(blake256.Sum256(filterTip[:]))
 }

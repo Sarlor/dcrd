@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -9,7 +9,7 @@ import (
 	"fmt"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/dcrutil/v3"
 )
 
 // NotificationType represents the type of a notification message.
@@ -29,10 +29,10 @@ const (
 	// It should be noted that the block might still ultimately fail to
 	// become the new main chain tip if it contains invalid scripts, double
 	// spends, etc.  However, this is quite rare in practice because a lot
-	// of work was expended to create a block which satisifies the proof of
+	// of work was expended to create a block which satisfies the proof of
 	// work requirement.
 	//
-	// Finally, this notification is only sent if the the chain is believed
+	// Finally, this notification is only sent if the chain is believed
 	// to be current and the chain lock is NOT released, so consumers must
 	// take care to avoid calling blockchain functions to avoid potential
 	// deadlock.
@@ -61,8 +61,8 @@ const (
 	// NTChainReorgDone indicates that a chain reorganization has concluded.
 	NTChainReorgDone
 
-	// NTReorganization indicates that a blockchain reorganization is in
-	// progress.
+	// NTReorganization indicates that a blockchain reorganization has taken
+	// place.
 	NTReorganization
 
 	// NTSpentAndMissedTickets indicates spent or missed tickets from a newly

@@ -1,29 +1,29 @@
 peer
 ====
 
-[![Build Status](http://img.shields.io/travis/decred/dcrd.svg)](https://travis-ci.org/decred/dcrd)
-[![ISC License](http://img.shields.io/badge/license-ISC-blue.svg)](http://copyfree.org)
-[![GoDoc](https://img.shields.io/badge/godoc-reference-blue.svg)](http://godoc.org/github.com/decred/dcrd/peer)
+[![Build Status](https://github.com/decred/dcrd/workflows/Build%20and%20Test/badge.svg)](https://github.com/decred/dcrd/actions)
+[![ISC License](https://img.shields.io/badge/license-ISC-blue.svg)](http://copyfree.org)
+[![Doc](https://img.shields.io/badge/doc-reference-blue.svg)](https://pkg.go.dev/github.com/decred/dcrd/peer/v2)
 
-Package peer provides a common base for creating and managing bitcoin network
+Package peer provides a common base for creating and managing Decred network
 peers.
 
 This package has intentionally been designed so it can be used as a standalone
-package for any projects needing a full featured bitcoin peer base to build on.
+package for any projects needing a full featured Decred peer base to build on.
 
 ## Overview
 
 This package builds upon the wire package, which provides the fundamental
-primitives necessary to speak the bitcoin wire protocol, in order to simplify
+primitives necessary to speak the Decred wire protocol, in order to simplify
 the process of creating fully functional peers.  In essence, it provides a
 common base for creating concurrent safe fully validating nodes, Simplified
 Payment Verification (SPV) nodes, proxies, etc.
 
 A quick overview of the major features peer provides are as follows:
 
- - Provides a basic concurrent safe bitcoin peer for handling bitcoin
+ - Provides a basic concurrent safe Decred peer for handling Decred
    communications via the peer-to-peer protocol
- - Full duplex reading and writing of bitcoin protocol messages
+ - Full duplex reading and writing of Decred protocol messages
  - Automatic handling of the initial handshake process including protocol
    version negotiation
  - Asynchronous message queueing of outbound messages with optional channel for
@@ -33,10 +33,10 @@ A quick overview of the major features peer provides are as follows:
      incoming connections so they have flexibility to establish connections as
      they see fit (proxies, etc)
    - User agent name and version
-   - Bitcoin network
+   - Decred network
    - Service support signalling (full nodes, etc)
    - Maximum supported protocol version
-   - Ability to register callbacks for handling bitcoin protocol messages
+   - Ability to register callbacks for handling Decred protocol messages
  - Inventory message batching and send trickling with known inventory detection
    and avoidance
  - Automatic periodic keep-alive pinging and pong responses
@@ -59,7 +59,7 @@ $ go get -u github.com/decred/dcrd/peer
 
 ## Examples
 
-* [New Outbound Peer Example](https://godoc.org/github.com/decred/dcrd/peer#example-package--NewOutboundPeer)  
+* [New Outbound Peer Example](https://pkg.go.dev/github.com/decred/dcrd/peer/v2#example-package-NewOutboundPeer)
   Demonstrates the basic process for initializing and creating an outbound peer.
   Peers negotiate by exchanging version and verack messages.  For demonstration,
   a simple handler for the version message is attached to the peer.

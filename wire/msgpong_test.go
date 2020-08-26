@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package wire
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"reflect"
 	"testing"
@@ -42,6 +43,13 @@ func TestPongLatest(t *testing.T) {
 		t.Errorf("MaxPayloadLength: wrong max payload length for "+
 			"protocol version %d - got %v, want %v", pver,
 			maxPayload, wantPayload)
+	}
+
+	// Ensure max payload length is not more than MaxMessagePayload.
+	if maxPayload > MaxMessagePayload {
+		t.Fatalf("MaxPayloadLength: payload length (%v) for protocol "+
+			"version %d exceeds MaxMessagePayload (%v).", maxPayload, pver,
+			MaxMessagePayload)
 	}
 
 	// Test encode with latest protocol version.
@@ -141,41 +149,20 @@ func TestPongWireErrors(t *testing.T) {
 		// Encode to wire format.
 		w := newFixedWriter(test.max)
 		err := test.in.BtcEncode(w, test.pver)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.writeErr) {
-			t.Errorf("BtcEncode #%d wrong error got: %v, want: %v",
-				i, err, test.writeErr)
+		if !errors.Is(err, test.writeErr) {
+			t.Errorf("BtcEncode #%d wrong error got: %v, want: %v", i, err,
+				test.writeErr)
 			continue
-		}
-
-		// For errors which are not of type MessageError, check them for
-		// equality.
-		if _, ok := err.(*MessageError); !ok {
-			if err != test.writeErr {
-				t.Errorf("BtcEncode #%d wrong error got: %v, "+
-					"want: %v", i, err, test.writeErr)
-				continue
-			}
 		}
 
 		// Decode from wire format.
 		var msg MsgPong
 		r := newFixedReader(test.max, test.buf)
 		err = msg.BtcDecode(r, test.pver)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.readErr) {
-			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
-				i, err, test.readErr)
+		if !errors.Is(err, test.readErr) {
+			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v", i, err,
+				test.readErr)
 			continue
 		}
-
-		// For errors which are not of type MessageError, check them for
-		// equality.
-		if _, ok := err.(*MessageError); !ok {
-			if err != test.readErr {
-				t.Errorf("BtcDecode #%d wrong error got: %v, "+
-					"want: %v", i, err, test.readErr)
-				continue
-			}
-		}
-
 	}
 }

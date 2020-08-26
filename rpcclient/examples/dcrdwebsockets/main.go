@@ -1,18 +1,19 @@
 // Copyright (c) 2014-2015 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package main
 
 import (
+	"context"
 	"io/ioutil"
 	"log"
 	"path/filepath"
 	"time"
 
-	"github.com/decred/dcrd/dcrutil"
-	"github.com/decred/dcrd/rpcclient"
+	"github.com/decred/dcrd/dcrutil/v3"
+	"github.com/decred/dcrd/rpcclient/v6"
 )
 
 func main() {
@@ -48,13 +49,14 @@ func main() {
 	}
 
 	// Register for block connect and disconnect notifications.
-	if err := client.NotifyBlocks(); err != nil {
+	ctx := context.Background()
+	if err := client.NotifyBlocks(ctx); err != nil {
 		log.Fatal(err)
 	}
 	log.Println("NotifyBlocks: Registration Complete")
 
 	// Get the current block count.
-	blockCount, err := client.GetBlockCount()
+	blockCount, err := client.GetBlockCount(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}

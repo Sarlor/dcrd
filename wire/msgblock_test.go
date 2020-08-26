@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package wire
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"reflect"
 	"testing"
@@ -57,6 +58,13 @@ func TestBlock(t *testing.T) {
 		t.Errorf("MaxPayloadLength: wrong max payload length for "+
 			"protocol version %d - got %v, want %v", pver,
 			maxPayload, wantPayload)
+	}
+
+	// Ensure max payload length is not more than MaxMessagePayload.
+	if maxPayload > MaxMessagePayload {
+		t.Fatalf("MaxPayloadLength: payload length (%v) for protocol "+
+			"version %d exceeds MaxMessagePayload (%v).", maxPayload, pver,
+			MaxMessagePayload)
 	}
 
 	// Ensure max payload is expected value for protocol version 3.
@@ -273,7 +281,7 @@ func TestBlockWireErrors(t *testing.T) {
 		// Encode to wire format.
 		w := newFixedWriter(test.max)
 		err := test.in.BtcEncode(w, test.pver)
-		if err != test.writeErr {
+		if !errors.Is(err, test.writeErr) {
 			t.Errorf("BtcEncode #%d wrong error got: %v, want: %v",
 				i, err, test.writeErr)
 			continue
@@ -283,7 +291,7 @@ func TestBlockWireErrors(t *testing.T) {
 		var msg MsgBlock
 		r := newFixedReader(test.max, test.buf)
 		err = msg.BtcDecode(r, test.pver)
-		if err != test.readErr {
+		if !errors.Is(err, test.readErr) {
 			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
 			continue
@@ -417,7 +425,7 @@ func TestBlockSerializeErrors(t *testing.T) {
 		// Serialize the block.
 		w := newFixedWriter(test.max)
 		err := test.in.Serialize(w)
-		if err != test.writeErr {
+		if !errors.Is(err, test.writeErr) {
 			t.Errorf("Serialize #%d wrong error got: %v, want: %v",
 				i, err, test.writeErr)
 			continue
@@ -427,7 +435,7 @@ func TestBlockSerializeErrors(t *testing.T) {
 		var block MsgBlock
 		r := newFixedReader(test.max, test.buf)
 		err = block.Deserialize(r)
-		if err != test.readErr {
+		if !errors.Is(err, test.readErr) {
 			t.Errorf("Deserialize #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
 			continue
@@ -436,7 +444,7 @@ func TestBlockSerializeErrors(t *testing.T) {
 		var txLocBlock MsgBlock
 		br := bytes.NewBuffer(test.buf[0:test.max])
 		_, _, err = txLocBlock.DeserializeTxLoc(br)
-		if err != test.readErr {
+		if !errors.Is(err, test.readErr) {
 			t.Errorf("DeserializeTxLoc #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
 			continue
@@ -491,10 +499,10 @@ func TestBlockOverflowErrors(t *testing.T) {
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+				0x5c, 0xa1, 0xab, 0x1e, // StakeVersion
 				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-				0x5c, 0xa1, 0xab, 0x1e, //StakeVersion
 				0xff, // TxnCount
-			}, pver, &MessageError{},
+			}, pver, ErrTooManyTxs,
 		},
 	}
 
@@ -504,27 +512,27 @@ func TestBlockOverflowErrors(t *testing.T) {
 		var msg MsgBlock
 		r := bytes.NewReader(test.buf)
 		err := msg.BtcDecode(r, test.pver)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
-			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
-				i, err, reflect.TypeOf(test.err))
+		if !errors.Is(err, test.err) {
+			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v", i, err,
+				test.err)
 			continue
 		}
 
 		// Deserialize from wire format.
 		r = bytes.NewReader(test.buf)
 		err = msg.Deserialize(r)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
-			t.Errorf("Deserialize #%d wrong error got: %v, want: %v",
-				i, err, reflect.TypeOf(test.err))
+		if !errors.Is(err, test.err) {
+			t.Errorf("Deserialize #%d wrong error got: %v, want: %v", i, err,
+				test.err)
 			continue
 		}
 
 		// Deserialize with transaction location info from wire format.
 		br := bytes.NewBuffer(test.buf)
 		_, _, err = msg.DeserializeTxLoc(br)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
-			t.Errorf("DeserializeTxLoc #%d wrong error got: %v, "+
-				"want: %v", i, err, reflect.TypeOf(test.err))
+		if !errors.Is(err, test.err) {
+			t.Errorf("DeserializeTxLoc #%d wrong error got: %v, want: %v", i,
+				err, test.err)
 			continue
 		}
 	}
@@ -725,7 +733,7 @@ var testBlockBytes = []byte{
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Previous output hash [186]
-	0xff, 0xff, 0xff, 0xff, // Prevous output index [218]
+	0xff, 0xff, 0xff, 0xff, // Previous output index [218]
 	0x00,                   // Previous output tree [222]
 	0xff, 0xff, 0xff, 0xff, // Sequence [223]
 	0x01,                                           // Varint for number of transaction outputs [227]
@@ -760,7 +768,7 @@ var testBlockBytes = []byte{
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Previous output hash
-	0xff, 0xff, 0xff, 0xff, // Prevous output index
+	0xff, 0xff, 0xff, 0xff, // Previous output index
 	0x01,                   // Previous output tree
 	0xff, 0xff, 0xff, 0xff, // Sequence
 	0x01,                                           // Varint for number of transaction outputs

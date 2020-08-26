@@ -1,27 +1,30 @@
 // Copyright (c) 2017 The btcsuite developers
-// Copyright (c) 2018 The Decred developers
+// Copyright (c) 2018-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package indexers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
-	"github.com/decred/dcrd/blockchain"
-	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/dcrutil"
-	"github.com/decred/dcrd/gcs"
-	"github.com/decred/dcrd/gcs/blockcf"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/database/v2"
+	"github.com/decred/dcrd/dcrutil/v3"
+	"github.com/decred/dcrd/gcs/v2"
+	"github.com/decred/dcrd/gcs/v2/blockcf"
 	"github.com/decred/dcrd/wire"
 )
 
 const (
 	// cfIndexName is the human-readable name for the index.
 	cfIndexName = "committed filter index"
+
+	// cfIndexVersion is the current version of the committed filter index.
+	cfIndexVersion = 2
 )
 
 // Committed filters come in two flavors: basic and extended. They are
@@ -126,6 +129,13 @@ func (idx *CFIndex) Name() string {
 	return cfIndexName
 }
 
+// Version returns the current version of the index.
+//
+// This is part of the Indexer interface.
+func (idx *CFIndex) Version() uint32 {
+	return cfIndexVersion
+}
+
 // Create is invoked when the indexer manager determines the index needs to
 // be created for the first time. It creates buckets for the two hash-based cf
 // indexes (simple, extended).
@@ -164,7 +174,7 @@ func (idx *CFIndex) Create(dbTx database.Tx) error {
 
 // storeFilter stores a given filter, and performs the steps needed to
 // generate the filter's header.
-func storeFilter(dbTx database.Tx, block *dcrutil.Block, f *gcs.Filter, filterType wire.FilterType) error {
+func storeFilter(dbTx database.Tx, block *dcrutil.Block, f *gcs.FilterV1, filterType wire.FilterType) error {
 	if uint8(filterType) > maxFilterType {
 		return errors.New("unsupported filter type")
 	}
@@ -177,7 +187,7 @@ func storeFilter(dbTx database.Tx, block *dcrutil.Block, f *gcs.Filter, filterTy
 	h := block.Hash()
 	var basicFilterBytes []byte
 	if f != nil {
-		basicFilterBytes = f.NBytes()
+		basicFilterBytes = f.Bytes()
 	}
 	err := dbStoreFilter(dbTx, fkey, h, basicFilterBytes)
 	if err != nil {
@@ -203,9 +213,9 @@ func storeFilter(dbTx database.Tx, block *dcrutil.Block, f *gcs.Filter, filterTy
 // ConnectBlock is invoked by the index manager when a new block has been
 // connected to the main chain. This indexer adds a hash-to-cf mapping for
 // every passed block. This is part of the Indexer interface.
-func (idx *CFIndex) ConnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, view *blockchain.UtxoViewpoint) error {
+func (idx *CFIndex) ConnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, _ PrevScripter) error {
 	f, err := blockcf.Regular(block.MsgBlock())
-	if err != nil && err != gcs.ErrNoData {
+	if err != nil {
 		return err
 	}
 
@@ -215,7 +225,7 @@ func (idx *CFIndex) ConnectBlock(dbTx database.Tx, block, parent *dcrutil.Block,
 	}
 
 	f, err = blockcf.Extended(block.MsgBlock())
-	if err != nil && err != gcs.ErrNoData {
+	if err != nil {
 		return err
 	}
 
@@ -225,7 +235,7 @@ func (idx *CFIndex) ConnectBlock(dbTx database.Tx, block, parent *dcrutil.Block,
 // DisconnectBlock is invoked by the index manager when a block has been
 // disconnected from the main chain.  This indexer removes the hash-to-cf
 // mapping for every passed block. This is part of the Indexer interface.
-func (idx *CFIndex) DisconnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, view *blockchain.UtxoViewpoint) error {
+func (idx *CFIndex) DisconnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, _ PrevScripter) error {
 	for _, key := range cfIndexKeys {
 		err := dbDeleteFilter(dbTx, key, block.Hash())
 		if err != nil {
@@ -245,6 +255,9 @@ func (idx *CFIndex) DisconnectBlock(dbTx database.Tx, block, parent *dcrutil.Blo
 
 // FilterByBlockHash returns the serialized contents of a block's basic or
 // extended committed filter.
+//
+// Deprecated: This will be removed in the next major version.  Use
+// blockchain.FilterByBlockHash instead.
 func (idx *CFIndex) FilterByBlockHash(h *chainhash.Hash, filterType wire.FilterType) ([]byte, error) {
 	if uint8(filterType) > maxFilterType {
 		return nil, errors.New("unsupported filter type")
@@ -260,6 +273,9 @@ func (idx *CFIndex) FilterByBlockHash(h *chainhash.Hash, filterType wire.FilterT
 
 // FilterHeaderByBlockHash returns the serialized contents of a block's basic
 // or extended committed filter header.
+//
+// Deprecated: This will be removed in the next major version.  Use
+// blockchain.FilterByBlockHash instead.
 func (idx *CFIndex) FilterHeaderByBlockHash(h *chainhash.Hash, filterType wire.FilterType) ([]byte, error) {
 	if uint8(filterType) > maxFilterType {
 		return nil, errors.New("unsupported filter type")
@@ -287,6 +303,6 @@ func NewCfIndex(db database.DB, chainParams *chaincfg.Params) *CFIndex {
 }
 
 // DropCfIndex drops the CF index from the provided database if exists.
-func DropCfIndex(db database.DB, interrupt <-chan struct{}) error {
+func DropCfIndex(ctx context.Context, db database.DB) error {
 	return dropIndexMetadata(db, cfIndexParentBucketKey, cfIndexName)
 }

@@ -1,9 +1,9 @@
 indexers
 ========
 
-[![Build Status](https://travis-ci.org/decred/dcrd.png?branch=master)](https://travis-ci.org/decred/dcrd)
-[![ISC License](http://img.shields.io/badge/license-ISC-blue.svg)](http://copyfree.org)
-[![GoDoc](https://godoc.org/github.com/decred/dcrd/blockchain/indexers?status.png)](http://godoc.org/github.com/decred/dcrd/blockchain/indexers)
+[![Build Status](https://github.com/decred/dcrd/workflows/Build%20and%20Test/badge.svg)](https://github.com/decred/dcrd/actions)
+[![ISC License](https://img.shields.io/badge/license-ISC-blue.svg)](http://copyfree.org)
+[![Doc](https://img.shields.io/badge/doc-reference-blue.svg)](https://pkg.go.dev/github.com/decred/dcrd/blockchain/v3/indexers)
 
 Package indexers implements optional block chain indexes.
 
@@ -20,9 +20,8 @@ via an RPC interface.
     or debit the address
   - Requires the transaction-by-hash index
 - Address-ever-seen (existsaddridx) Index
-  - Stores a key with an empty value for every address that has ever existed 
+  - Stores a key with an empty value for every address that has ever existed
     and was seen by the client
-  - Requires the transaction-by-hash index
 - Committed Filter (cfindexparentbucket) Index
   - Stores all committed filters and committed filter headers for all blocks in
     the main chain

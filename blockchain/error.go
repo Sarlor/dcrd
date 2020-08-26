@@ -1,11 +1,12 @@
 // Copyright (c) 2014-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package blockchain
 
 import (
+	"errors"
 	"fmt"
 )
 
@@ -23,8 +24,8 @@ func (e VoteVersionError) Error() string {
 // not exist.
 type HashError string
 
-// Error returns the assertion error as a human-readable string and satisfies
-// the error interface.
+// Error returns the error as a human-readable string and satisfies the error
+// interface.
 func (e HashError) Error() string {
 	return fmt.Sprintf("hash %v does not exist", string(e))
 }
@@ -37,6 +38,27 @@ type DeploymentError string
 // the error interface.
 func (e DeploymentError) Error() string {
 	return fmt.Sprintf("deployment ID %v does not exist", string(e))
+}
+
+// DuplicateDeploymentError identifies an error that indicates a duplicate
+// deployment ID was specified in the network parameter deployment definitions.
+type DuplicateDeploymentError string
+
+// Error returns the assertion error as a human-readable string and satisfies
+// the error interface.
+func (e DuplicateDeploymentError) Error() string {
+	return fmt.Sprintf("deployment ID %v exists in more than one deployment",
+		string(e))
+}
+
+// NoFilterError identifies an error that indicates a filter for a given block
+// hash does not exist.
+type NoFilterError string
+
+// Error returns the error as a human-readable string and satisfies the error
+// interface.
+func (e NoFilterError) Error() string {
+	return fmt.Sprintf("no filter available for block %s", string(e))
 }
 
 // AssertError identifies an error that indicates an internal code consistency
@@ -99,8 +121,8 @@ const (
 
 	// ErrUnexpectedDifficulty indicates specified bits do not align with
 	// the expected value either because it doesn't match the calculated
-	// valued based on difficulty regarted rules or it is out of the valid
-	// range.
+	// value based on difficulty regarding the rules or it is out of the
+	// valid range.
 	ErrUnexpectedDifficulty
 
 	// ErrHighHash indicates the block does not hash to a value which is
@@ -110,6 +132,10 @@ const (
 	// ErrBadMerkleRoot indicates the calculated merkle root does not match
 	// the expected value.
 	ErrBadMerkleRoot
+
+	// ErrBadCommitmentRoot indicates the calculated commitment root does
+	// not match the expected value.
+	ErrBadCommitmentRoot
 
 	// ErrBadCheckpoint indicates a block that is expected to be at a
 	// checkpoint height does not match the expected one.
@@ -379,7 +405,7 @@ const (
 	ErrRegTxCreateStakeOut
 
 	// ErrInvalidFinalState indicates that the final state of the PRNG included
-	// in the the block differed from the calculated final state.
+	// in the block differed from the calculated final state.
 	ErrInvalidFinalState
 
 	// ErrPoolSize indicates an error in the ticket pool size for this block.
@@ -415,7 +441,7 @@ const (
 	ErrBadBlockHeight
 
 	// ErrBlockOneTx indicates that block height 1 failed to correct generate
-	// the block one premine transaction.
+	// the block one initial payout transaction.
 	ErrBlockOneTx
 
 	// ErrBlockOneTx indicates that block height 1 coinbase transaction in
@@ -492,6 +518,7 @@ var errorCodeStrings = map[ErrorCode]string{
 	ErrUnexpectedDifficulty:   "ErrUnexpectedDifficulty",
 	ErrHighHash:               "ErrHighHash",
 	ErrBadMerkleRoot:          "ErrBadMerkleRoot",
+	ErrBadCommitmentRoot:      "ErrBadCommitmentRoot",
 	ErrBadCheckpoint:          "ErrBadCheckpoint",
 	ErrForkTooOld:             "ErrForkTooOld",
 	ErrCheckpointTimeTooOld:   "ErrCheckpointTimeTooOld",
@@ -604,7 +631,14 @@ func (e RuleError) Error() string {
 	return e.Description
 }
 
-// ruleError creates an RuleError given a set of arguments.
+// ruleError creates a RuleError given a set of arguments.
 func ruleError(c ErrorCode, desc string) RuleError {
 	return RuleError{ErrorCode: c, Description: desc}
+}
+
+// IsErrorCode returns whether or not the provided error is a rule error with
+// the provided error code.
+func IsErrorCode(err error, c ErrorCode) bool {
+	var e RuleError
+	return errors.As(err, &e) && e.ErrorCode == c
 }

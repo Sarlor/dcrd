@@ -69,7 +69,7 @@ func (b *addrIndexBucket) printLevels(addrKey [addrKeySize]byte) string {
 		if !bytes.Equal(k[:levelOffset], addrKey[:]) {
 			continue
 		}
-		level := uint8(k[levelOffset])
+		level := k[levelOffset]
 		if level > highestLevel {
 			highestLevel = level
 		}
@@ -106,7 +106,7 @@ func (b *addrIndexBucket) sanityCheck(addrKey [addrKeySize]byte, expectedTotal i
 		if !bytes.Equal(k[:levelOffset], addrKey[:]) {
 			continue
 		}
-		level := uint8(k[levelOffset])
+		level := k[levelOffset]
 		if level > highestLevel {
 			highestLevel = level
 		}
@@ -118,7 +118,7 @@ func (b *addrIndexBucket) sanityCheck(addrKey [addrKeySize]byte, expectedTotal i
 	var totalEntries int
 	maxEntries := level0MaxEntries
 	for level := uint8(0); level <= highestLevel; level++ {
-		// Level 0 can'have more entries than the max allowed if the
+		// Level 0 can't have more entries than the max allowed if the
 		// levels after it have data and it can't be empty.  All other
 		// levels must either be half full or full.
 		data := b.levels[keyForLevel(addrKey, level)]
@@ -222,7 +222,7 @@ nextTest:
 		for i := 0; i < test.numInsert; i++ {
 			txLoc := wire.TxLoc{TxStart: i * 2}
 			err := dbPutAddrIndexEntry(populatedBucket, test.key,
-				uint32(i), txLoc)
+				uint32(i), txLoc, uint32(i%100))
 			if err != nil {
 				t.Errorf("dbPutAddrIndexEntry #%d (%s) - "+
 					"unexpected error: %v", testNum,

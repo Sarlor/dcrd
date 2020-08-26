@@ -6,7 +6,6 @@
 package addrmgr
 
 import (
-	"container/list"
 	crand "crypto/rand" // for seeding
 	"encoding/base32"
 	"encoding/binary"
@@ -40,7 +39,7 @@ type AddrManager struct {
 	key            [32]byte                                 // cryptographically secure random bytes
 	addrIndex      map[string]*KnownAddress                 // address key to ka for all addresses
 	addrNew        [newBucketCount]map[string]*KnownAddress // storage for new addresses
-	addrTried      [triedBucketCount]*list.List             // storage for tried addresses
+	addrTried      [triedBucketCount][]*KnownAddress        // storage for tried addresses
 	addrChanged    bool                                     // true if address state needs saving
 	started        int32                                    // is 1 if started
 	shutdown       int32                                    // is 1 if shutdown is done or in progress
@@ -73,6 +72,13 @@ type serializedAddrManager struct {
 type localAddress struct {
 	na    *wire.NetAddress
 	score AddressPriority
+}
+
+// LocalAddr represents network address information for a local address.
+type LocalAddr struct {
+	Address string
+	Port    uint16
+	Score   int32
 }
 
 // AddressPriority type is used to describe the hierarchy of local address
@@ -134,7 +140,7 @@ const (
 	newBucketsPerAddress = 8
 
 	// numMissingDays is the number of days before which we assume an
-	// address has vanished if we have not seen it announced  in that long.
+	// address has vanished if we have not seen it announced in that long.
 	numMissingDays = 30
 
 	// numRetries is the number of tried without a single success before
@@ -287,18 +293,17 @@ func (a *AddrManager) expireNew(bucket int) {
 // pickTried selects an address from the tried bucket to be evicted.
 // We just choose the eldest. Bitcoind selects 4 random entries and throws away
 // the older of them.
-func (a *AddrManager) pickTried(bucket int) *list.Element {
+func (a *AddrManager) pickTried(bucket int) int {
 	var oldest *KnownAddress
-	var oldestElem *list.Element
-	for e := a.addrTried[bucket].Front(); e != nil; e = e.Next() {
-		ka := e.Value.(*KnownAddress)
-		if oldest == nil || oldest.na.Timestamp.After(ka.na.Timestamp) {
-			oldestElem = e
-			oldest = ka
-		}
+	var idx int
 
+	for i, ka := range a.addrTried[bucket] {
+		if i == 0 || oldest.na.Timestamp.After(ka.na.Timestamp) {
+			oldest = ka
+			idx = i
+		}
 	}
-	return oldestElem
+	return idx
 }
 
 func (a *AddrManager) getNewBucket(netAddr, srcAddr *wire.NetAddress) int {
@@ -376,7 +381,7 @@ func (a *AddrManager) savePeers() {
 		return
 	}
 
-	// First we make a serialisable datastructure so we can encode it to JSON.
+	// First we make a serialisable data structure so we can encode it to JSON.
 	sam := new(serializedAddrManager)
 	sam.Version = serialisationVersion
 	copy(sam.Key[:], a.key[:])
@@ -405,10 +410,9 @@ func (a *AddrManager) savePeers() {
 		}
 	}
 	for i := range a.addrTried {
-		sam.TriedBuckets[i] = make([]string, a.addrTried[i].Len())
+		sam.TriedBuckets[i] = make([]string, len(a.addrTried[i]))
 		j := 0
-		for e := a.addrTried[i].Front(); e != nil; e = e.Next() {
-			ka := e.Value.(*KnownAddress)
+		for _, ka := range a.addrTried[i] {
 			sam.TriedBuckets[i][j] = NetAddressKey(ka.na)
 			j++
 		}
@@ -525,7 +529,7 @@ func (a *AddrManager) deserializePeers(filePath string) error {
 
 			ka.tried = true
 			a.nTried++
-			a.addrTried[i].PushBack(ka)
+			a.addrTried[i] = append(a.addrTried[i], ka)
 		}
 	}
 
@@ -538,7 +542,7 @@ func (a *AddrManager) deserializePeers(filePath string) error {
 
 		if v.refs > 0 && v.tried {
 			return fmt.Errorf("address %s after serialisation "+
-				"which is both new and tried!", k)
+				"which is both new and tried", k)
 		}
 	}
 
@@ -698,7 +702,6 @@ func (a *AddrManager) AddressCache() []*wire.NetAddress {
 // reset resets the address manager by reinitialising the random source
 // and allocating fresh empty bucket storage.
 func (a *AddrManager) reset() {
-
 	a.addrIndex = make(map[string]*KnownAddress)
 
 	// fill key with bytes from a good random source.
@@ -707,7 +710,7 @@ func (a *AddrManager) reset() {
 		a.addrNew[i] = make(map[string]*KnownAddress)
 	}
 	for i := range a.addrTried {
-		a.addrTried[i] = list.New()
+		a.addrTried[i] = nil
 	}
 	a.addrChanged = true
 }
@@ -748,7 +751,7 @@ func (a *AddrManager) HostToNetAddress(host string, port uint16, services wire.S
 // the relevant .onion address.
 func ipString(na *wire.NetAddress) string {
 	if isOnionCatTor(na) {
-		// We know now that na.IP is long enogh.
+		// We know now that na.IP is long enough.
 		base32 := base32.StdEncoding.EncodeToString(na.IP[6:])
 		return strings.ToLower(base32) + ".onion"
 	}
@@ -784,16 +787,14 @@ func (a *AddrManager) GetAddress() *KnownAddress {
 		for {
 			// Pick a random bucket.
 			bucket := a.rand.Intn(len(a.addrTried))
-			if a.addrTried[bucket].Len() == 0 {
+			if len(a.addrTried[bucket]) == 0 {
 				continue
 			}
 
 			// Then, a random entry in the list.
-			e := a.addrTried[bucket].Front()
-			for i := a.rand.Int63n(int64(a.addrTried[bucket].Len())); i > 0; i-- {
-				e = e.Next()
-			}
-			ka := e.Value.(*KnownAddress)
+			randEntry := a.rand.Intn(len(a.addrTried[bucket]))
+			ka := a.addrTried[bucket][randEntry]
+
 			randval := a.rand.Intn(large)
 			if float64(randval) < (factor * ka.chance() * float64(large)) {
 				log.Tracef("Selected %v from tried bucket",
@@ -899,7 +900,7 @@ func (a *AddrManager) Good(addr *wire.NetAddress) {
 	ka.lastattempt = now
 	ka.attempts = 0
 
-	// move to tried set, optionally evicting other addresses if neeed.
+	// move to tried set, optionally evicting other addresses if needed.
 	if ka.tried {
 		return
 	}
@@ -931,17 +932,17 @@ func (a *AddrManager) Good(addr *wire.NetAddress) {
 	bucket := a.getTriedBucket(ka.na)
 
 	// Room in this tried bucket?
-	if a.addrTried[bucket].Len() < triedBucketSize {
+	if len(a.addrTried[bucket]) < triedBucketSize {
 		ka.tried = true
-		a.addrTried[bucket].PushBack(ka)
+		a.addrTried[bucket] = append(a.addrTried[bucket], ka)
 		a.addrChanged = true
 		a.nTried++
 		return
 	}
 
 	// No room, we have to evict something else.
-	entry := a.pickTried(bucket)
-	rmka := entry.Value.(*KnownAddress)
+	triedIdx := a.pickTried(bucket)
+	rmka := a.addrTried[bucket][triedIdx]
 
 	// First bucket it would have been put in.
 	newBucket := a.getNewBucket(rmka.na, rmka.srcAddr)
@@ -954,7 +955,7 @@ func (a *AddrManager) Good(addr *wire.NetAddress) {
 
 	// replace with ka in list.
 	ka.tried = true
-	entry.Value = ka
+	a.addrTried[bucket][triedIdx] = ka
 
 	rmka.tried = false
 	rmka.refs++
@@ -971,7 +972,7 @@ func (a *AddrManager) Good(addr *wire.NetAddress) {
 	a.addrNew[newBucket][rmkey] = rmka
 }
 
-// SetServices sets the services for the giiven address to the provided value.
+// SetServices sets the services for the given address to the provided value.
 func (a *AddrManager) SetServices(addr *wire.NetAddress, services wire.ServiceFlag) {
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
@@ -1017,19 +1018,74 @@ func (a *AddrManager) AddLocalAddress(na *wire.NetAddress, priority AddressPrior
 	return nil
 }
 
+// HasLocalAddress asserts if the manager has the provided local address.
+func (a *AddrManager) HasLocalAddress(na *wire.NetAddress) bool {
+	key := NetAddressKey(na)
+	a.lamtx.Lock()
+	_, ok := a.localAddresses[key]
+	a.lamtx.Unlock()
+	return ok
+}
+
+// LocalAddresses returns a summary of local addresses information for
+// the getnetworkinfo rpc.
+//
+// This function is safe for concurrent access.
+func (a *AddrManager) LocalAddresses() []LocalAddr {
+	a.lamtx.Lock()
+	defer a.lamtx.Unlock()
+
+	addrs := make([]LocalAddr, 0, len(a.localAddresses))
+	for _, addr := range a.localAddresses {
+		la := LocalAddr{
+			Address: addr.na.IP.String(),
+			Port:    addr.na.Port,
+		}
+
+		addrs = append(addrs, la)
+	}
+
+	return addrs
+}
+
+// FetchLocalAddresses fetches a summary of local addresses information for
+// the getnetworkinfo rpc.
+//
+// Deprecated: This will be removed in the next major version bump.
+// Use LocalAddresses instead.
+func (a *AddrManager) FetchLocalAddresses() []LocalAddr {
+	return a.LocalAddresses()
+}
+
+const (
+	// Unreachable represents a publicly unreachable connection state
+	// between two addresses.
+	Unreachable = 0
+
+	// Default represents the default connection state between
+	// two addresses.
+	Default = iota
+
+	// Teredo represents a connection state between two RFC4380 addresses.
+	Teredo
+
+	// Ipv6Weak represents a weak IPV6 connection state between two
+	// addresses.
+	Ipv6Weak
+
+	// Ipv4 represents an IPV4 connection state between two addresses.
+	Ipv4
+
+	// Ipv6Strong represents a connection state between two IPV6 addresses.
+	Ipv6Strong
+
+	// Private represents a connection state connect between two Tor addresses.
+	Private
+)
+
 // getReachabilityFrom returns the relative reachability of the provided local
 // address to the provided remote address.
 func getReachabilityFrom(localAddr, remoteAddr *wire.NetAddress) int {
-	const (
-		Unreachable = 0
-		Default     = iota
-		Teredo
-		Ipv6Weak
-		Ipv4
-		Ipv6Strong
-		Private
-	)
-
 	if !IsRoutable(remoteAddr) {
 		return Unreachable
 	}
@@ -1132,6 +1188,27 @@ func (a *AddrManager) GetBestLocalAddress(remoteAddr *wire.NetAddress) *wire.Net
 	}
 
 	return bestAddress
+}
+
+// ValidatePeerNa returns the validity and reachability of the
+// provided local address based on its routablility and reachability
+// from the peer that suggested it.
+func (a *AddrManager) ValidatePeerNa(localAddr, remoteAddr *wire.NetAddress) (bool, int) {
+	net := getNetwork(localAddr)
+	reach := getReachabilityFrom(localAddr, remoteAddr)
+	valid := (net == IPv4Address && reach == Ipv4) || (net == IPv6Address &&
+		(reach == Ipv6Weak || reach == Ipv6Strong || reach == Teredo))
+	return valid, reach
+}
+
+// IsPeerNaValid asserts if the provided local address is routable
+// and reachabile from the peer that suggested it.
+//
+// This function has been deprecated, to be removed in the next major version
+// bump.
+func (a *AddrManager) IsPeerNaValid(localAddr, remoteAddr *wire.NetAddress) bool {
+	valid, _ := a.ValidatePeerNa(localAddr, remoteAddr)
+	return valid
 }
 
 // New returns a new Decred address manager.

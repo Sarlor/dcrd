@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016-2018 The Decred developers
+// Copyright (c) 2016-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,33 +7,87 @@ package blockchain
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
 	"time"
 
-	"github.com/decred/dcrd/blockchain/internal/dbnamespace"
-	"github.com/decred/dcrd/blockchain/stake"
+	"github.com/decred/dcrd/blockchain/stake/v3"
+	"github.com/decred/dcrd/blockchain/standalone/v2"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/database/v2"
+	"github.com/decred/dcrd/dcrutil/v3"
+	"github.com/decred/dcrd/gcs/v2"
+	"github.com/decred/dcrd/gcs/v2/blockcf2"
 	"github.com/decred/dcrd/wire"
 )
 
 const (
 	// currentDatabaseVersion indicates what the current database
 	// version is.
-	currentDatabaseVersion = 4
+	currentDatabaseVersion = 6
 
 	// currentBlockIndexVersion indicates what the current block index
 	// database version.
-	currentBlockIndexVersion = 2
+	currentBlockIndexVersion = 3
 
 	// blockHdrSize is the size of a block header.  This is simply the
 	// constant from wire and is only provided here for convenience since
 	// wire.MaxBlockHeaderPayload is quite long.
 	blockHdrSize = wire.MaxBlockHeaderPayload
+)
+
+var (
+	// byteOrder is the preferred byte order used for serializing numeric fields
+	// for storage in the database.
+	byteOrder = binary.LittleEndian
+
+	// bcdbInfoBucketName is the name of the database bucket used to house
+	// global versioning and date information for the blockchain database.
+	bcdbInfoBucketName = []byte("dbinfo")
+
+	// bcdbInfoVersionKeyName is the name of the database key used to house the
+	// database version.  It is itself under the bcdbInfoBucketName bucket.
+	bcdbInfoVersionKeyName = []byte("version")
+
+	// bcdbInfoCompressionVerKeyName is the name of the database key used to
+	// house the database compression version.  It is itself under the
+	// bcdbInfoBucketName bucket.
+	bcdbInfoCompressionVerKeyName = []byte("compver")
+
+	// bcdbInfoBlockIndexVerKeyName is the name of the database key used to
+	// house the database block index version.  It is itself under the
+	// bcdbInfoBucketName bucket.
+	bcdbInfoBlockIndexVerKeyName = []byte("bidxver")
+
+	// bcdbInfoCreatedKeyName is the name of the database key used to house
+	// date the database was created.  It is itself under the
+	// bcdbInfoBucketName bucket.
+	bcdbInfoCreatedKeyName = []byte("created")
+
+	// chainStateKeyName is the name of the db key used to store the best chain
+	// state.
+	chainStateKeyName = []byte("chainstate")
+
+	// spendJournalBucketName is the name of the db bucket used to house
+	// transactions outputs that are spent in each block.
+	spendJournalBucketName = []byte("spendjournal")
+
+	// utxoSetBucketName is the name of the db bucket used to house the unspent
+	// transaction output set.
+	utxoSetBucketName = []byte("utxoset")
+
+	// blockIndexBucketName is the name of the db bucket used to house the block
+	// index which consists of metadata for all known blocks both in the main
+	// chain and on side chains.
+	blockIndexBucketName = []byte("blockidxv3")
+
+	// gcsFilterBucketName is the name of the db bucket used to house GCS
+	// filters.
+	gcsFilterBucketName = []byte("gcsfilters")
 )
 
 // errNotInMainChain signifies that a block hash or height that is not in the
@@ -43,13 +97,6 @@ type errNotInMainChain string
 // Error implements the error interface.
 func (e errNotInMainChain) Error() string {
 	return string(e)
-}
-
-// isNotInMainChainErr returns whether or not the passed error is an
-// errNotInMainChain error.
-func isNotInMainChainErr(err error) bool {
-	_, ok := err.(errNotInMainChain)
-	return ok
 }
 
 // errDeserialize signifies that a problem was encountered when deserializing
@@ -64,8 +111,8 @@ func (e errDeserialize) Error() string {
 // isDeserializeErr returns whether or not the passed error is an errDeserialize
 // error.
 func isDeserializeErr(err error) bool {
-	_, ok := err.(errDeserialize)
-	return ok
+	var e errDeserialize
+	return errors.As(err, &e)
 }
 
 // -----------------------------------------------------------------------------
@@ -137,27 +184,48 @@ func deserializeToMinimalOutputs(serialized []byte) ([]*stake.MinimalOutput, int
 }
 
 // readDeserializeSizeOfMinimalOutputs reads the size of the stored set of
-// minimal outputs without allocating memory for the structs themselves. It
-// will panic if the function reads outside of memory bounds.
-func readDeserializeSizeOfMinimalOutputs(serialized []byte) int {
+// minimal outputs without allocating memory for the structs themselves.
+func readDeserializeSizeOfMinimalOutputs(serialized []byte) (int, error) {
 	numOutputs, offset := deserializeVLQ(serialized)
+	if offset == 0 {
+		return offset, errDeserialize("unexpected end of " +
+			"data during decoding (num outputs)")
+	}
 	for i := 0; i < int(numOutputs); i++ {
 		// Amount
 		_, bytesRead := deserializeVLQ(serialized[offset:])
+		if bytesRead == 0 {
+			return offset, errDeserialize("unexpected end of " +
+				"data during decoding (output amount)")
+		}
 		offset += bytesRead
 
 		// Script version
 		_, bytesRead = deserializeVLQ(serialized[offset:])
+		if bytesRead == 0 {
+			return offset, errDeserialize("unexpected end of " +
+				"data during decoding (output script version)")
+		}
 		offset += bytesRead
 
 		// Script
 		var scriptSize uint64
 		scriptSize, bytesRead = deserializeVLQ(serialized[offset:])
+		if bytesRead == 0 {
+			return offset, errDeserialize("unexpected end of " +
+				"data during decoding (output script size)")
+		}
 		offset += bytesRead
+
+		if uint64(len(serialized[offset:])) < scriptSize {
+			return offset, errDeserialize("unexpected end of " +
+				"data during decoding (output script)")
+		}
+
 		offset += int(scriptSize)
 	}
 
-	return offset
+	return offset, nil
 }
 
 // ConvertUtxosToMinimalOutputs converts the contents of a UTX to a series of
@@ -171,7 +239,7 @@ func ConvertUtxosToMinimalOutputs(entry *UtxoEntry) []*stake.MinimalOutput {
 
 // -----------------------------------------------------------------------------
 // The block index consists of an entry for every known block.  It consists of
-// information such as the block header and hashes of tickets voted and revoked.
+// information such as the block header and information about votes.
 //
 // The serialized key format is:
 //
@@ -190,21 +258,15 @@ func ConvertUtxosToMinimalOutputs(entry *UtxoEntry) []*stake.MinimalOutput {
 //   status             blockStatus         1 byte
 //   num votes          VLQ                 variable
 //   vote info
-//     ticket hash      chainhash.Hash      chainhash.HashSize
 //     vote version     VLQ                 variable
 //     vote bits        VLQ                 variable
-//   num revoked        VLQ                 variable
-//   revoked tickets
-//     ticket hash      chainhash.Hash      chainhash.HashSize
 // -----------------------------------------------------------------------------
 
 // blockIndexEntry represents a block index database entry.
 type blockIndexEntry struct {
-	header         wire.BlockHeader
-	status         blockStatus
-	voteInfo       []stake.VoteVersionTuple
-	ticketsVoted   []chainhash.Hash
-	ticketsRevoked []chainhash.Hash
+	header   wire.BlockHeader
+	status   blockStatus
+	voteInfo []stake.VoteVersionTuple
 }
 
 // blockIndexKey generates the binary key for an entry in the block index
@@ -224,14 +286,12 @@ func blockIndexKey(blockHash *chainhash.Hash, blockHeight uint32) []byte {
 func blockIndexEntrySerializeSize(entry *blockIndexEntry) int {
 	voteInfoSize := 0
 	for i := range entry.voteInfo {
-		voteInfoSize += chainhash.HashSize +
-			serializeSizeVLQ(uint64(entry.voteInfo[i].Version)) +
+		voteInfoSize += serializeSizeVLQ(uint64(entry.voteInfo[i].Version)) +
 			serializeSizeVLQ(uint64(entry.voteInfo[i].Bits))
 	}
 
 	return blockHdrSize + 1 + serializeSizeVLQ(uint64(len(entry.voteInfo))) +
-		voteInfoSize + serializeSizeVLQ(uint64(len(entry.ticketsRevoked))) +
-		chainhash.HashSize*len(entry.ticketsRevoked)
+		voteInfoSize
 }
 
 // putBlockIndexEntry serializes the passed block index entry according to the
@@ -239,11 +299,6 @@ func blockIndexEntrySerializeSize(entry *blockIndexEntry) int {
 // target byte slice must be at least large enough to handle the number of bytes
 // returned by the blockIndexEntrySerializeSize function or it will panic.
 func putBlockIndexEntry(target []byte, entry *blockIndexEntry) (int, error) {
-	if len(entry.voteInfo) != len(entry.ticketsVoted) {
-		return 0, AssertError("putBlockIndexEntry called with " +
-			"mismatched number of tickets voted and vote info")
-	}
-
 	// Serialize the entire block header.
 	w := bytes.NewBuffer(target[0:0])
 	if err := entry.header.Serialize(w); err != nil {
@@ -258,16 +313,8 @@ func putBlockIndexEntry(target []byte, entry *blockIndexEntry) (int, error) {
 	// Serialize the number of votes and associated vote information.
 	offset += putVLQ(target[offset:], uint64(len(entry.voteInfo)))
 	for i := range entry.voteInfo {
-		offset += copy(target[offset:], entry.ticketsVoted[i][:])
 		offset += putVLQ(target[offset:], uint64(entry.voteInfo[i].Version))
 		offset += putVLQ(target[offset:], uint64(entry.voteInfo[i].Bits))
-	}
-
-	// Serialize the number of revocations and associated revocation
-	// information.
-	offset += putVLQ(target[offset:], uint64(len(entry.ticketsRevoked)))
-	for i := range entry.ticketsRevoked {
-		offset += copy(target[offset:], entry.ticketsRevoked[i][:])
 	}
 
 	return offset, nil
@@ -308,7 +355,6 @@ func decodeBlockIndexEntry(serialized []byte, entry *blockIndexEntry) (int, erro
 	offset++
 
 	// Deserialize the number of tickets spent.
-	var ticketsVoted []chainhash.Hash
 	var votes []stake.VoteVersionTuple
 	numVotes, bytesRead := deserializeVLQ(serialized[offset:])
 	if bytesRead == 0 {
@@ -317,18 +363,8 @@ func decodeBlockIndexEntry(serialized []byte, entry *blockIndexEntry) (int, erro
 	}
 	offset += bytesRead
 	if numVotes > 0 {
-		ticketsVoted = make([]chainhash.Hash, numVotes)
 		votes = make([]stake.VoteVersionTuple, numVotes)
 		for i := uint64(0); i < numVotes; i++ {
-			// Deserialize the ticket hash associated with the vote.
-			if offset+chainhash.HashSize > len(serialized) {
-				return offset, errDeserialize(fmt.Sprintf("unexpected "+
-					"end of data while reading vote #%d hash",
-					i))
-			}
-			copy(ticketsVoted[i][:], serialized[offset:])
-			offset += chainhash.HashSize
-
 			// Deserialize the vote version.
 			version, bytesRead := deserializeVLQ(serialized[offset:])
 			if bytesRead == 0 {
@@ -352,34 +388,9 @@ func decodeBlockIndexEntry(serialized []byte, entry *blockIndexEntry) (int, erro
 		}
 	}
 
-	// Deserialize the number of tickets revoked.
-	var ticketsRevoked []chainhash.Hash
-	numTicketsRevoked, bytesRead := deserializeVLQ(serialized[offset:])
-	if bytesRead == 0 {
-		return offset, errDeserialize("unexpected end of data while " +
-			"reading num tickets revoked")
-	}
-	offset += bytesRead
-	if numTicketsRevoked > 0 {
-		ticketsRevoked = make([]chainhash.Hash, numTicketsRevoked)
-		for i := uint64(0); i < numTicketsRevoked; i++ {
-			// Deserialize the ticket hash associated with the
-			// revocation.
-			if offset+chainhash.HashSize > len(serialized) {
-				return offset, errDeserialize(fmt.Sprintf("unexpected "+
-					"end of data while reading revocation "+
-					"#%d", i))
-			}
-			copy(ticketsRevoked[i][:], serialized[offset:])
-			offset += chainhash.HashSize
-		}
-	}
-
 	entry.header = header
 	entry.status = status
 	entry.voteInfo = votes
-	entry.ticketsVoted = ticketsVoted
-	entry.ticketsRevoked = ticketsRevoked
 	return offset, nil
 }
 
@@ -397,17 +408,15 @@ func deserializeBlockIndexEntry(serialized []byte) (*blockIndexEntry, error) {
 // block node in the block index according to the format described above.
 func dbPutBlockNode(dbTx database.Tx, node *blockNode) error {
 	serialized, err := serializeBlockIndexEntry(&blockIndexEntry{
-		header:         node.Header(),
-		status:         node.status,
-		voteInfo:       node.votes,
-		ticketsVoted:   node.ticketsVoted,
-		ticketsRevoked: node.ticketsRevoked,
+		header:   node.Header(),
+		status:   node.status,
+		voteInfo: node.votes,
 	})
 	if err != nil {
 		return err
 	}
 
-	bucket := dbTx.Metadata().Bucket(dbnamespace.BlockIndexBucketName)
+	bucket := dbTx.Metadata().Bucket(blockIndexBucketName)
 	key := blockIndexKey(&node.hash, uint32(node.height))
 	return bucket.Put(key, serialized)
 }
@@ -475,7 +484,7 @@ func dbMaybeStoreBlock(dbTx database.Tx, block *dcrutil.Block) error {
 //   NOTE: The transaction version and flags are only encoded when the spent
 //   txout was the final unspent output of the containing transaction.
 //   Otherwise, the header code will be 0 and the version is not serialized at
-//   all. This is  done because that information is only needed when the utxo
+//   all. This is done because that information is only needed when the utxo
 //   set no longer has it.
 //
 // Example:
@@ -497,7 +506,7 @@ type spentTxOut struct {
 
 	amount        int64        // The amount of the output.
 	txType        stake.TxType // The stake type of the transaction.
-	height        uint32       // Height of the the block containing the tx.
+	height        uint32       // Height of the block containing the tx.
 	index         uint32       // Index in the block of the transaction.
 	scriptVersion uint16       // The version of the scripting language.
 	txVersion     uint16       // The version of creating tx.
@@ -572,27 +581,11 @@ func putSpentTxOut(target []byte, stxo *spentTxOut) int {
 // An error will be returned if the version is not serialized as a part of the
 // stxo and is also not provided to the function.
 func decodeSpentTxOut(serialized []byte, stxo *spentTxOut, amount int64, height uint32, index uint32) (int, error) {
-	// Ensure there are bytes to decode.
-	if len(serialized) == 0 {
-		return 0, errDeserialize("no serialized bytes")
-	}
-
-	// Deserialize the header code.
+	// Deserialize the flags.
 	flags, offset := deserializeVLQ(serialized)
-	if offset >= len(serialized) {
-		return offset, errDeserialize("unexpected end of data after " +
-			"spent tx out flags")
-	}
-
-	// Decode the flags. If the flags are non-zero, it means that the
-	// transaction was fully spent at this spend.
-	if decodeFlagsFullySpent(byte(flags)) {
-		isCoinBase, hasExpiry, txType, _ := decodeFlags(byte(flags))
-
-		stxo.isCoinBase = isCoinBase
-		stxo.hasExpiry = hasExpiry
-		stxo.txType = txType
-		stxo.txFullySpent = true
+	if offset == 0 {
+		return 0, errDeserialize("unexpected end of data during " +
+			"decoding (flags)")
 	}
 
 	// Decode the compressed txout. We pass false for the amount flag,
@@ -616,22 +609,28 @@ func decodeSpentTxOut(serialized []byte, stxo *spentTxOut, amount int64, height 
 	// Deserialize the containing transaction if the flags indicate that
 	// the transaction has been fully spent.
 	if decodeFlagsFullySpent(byte(flags)) {
+		isCoinBase, hasExpiry, txType, _ := decodeFlags(byte(flags))
+
+		stxo.isCoinBase = isCoinBase
+		stxo.hasExpiry = hasExpiry
+		stxo.txType = txType
+		stxo.txFullySpent = true
+
 		txVersion, bytesRead := deserializeVLQ(serialized[offset:])
-		offset += bytesRead
-		if offset == 0 || offset > len(serialized) {
-			return offset, errDeserialize("unexpected end of data " +
-				"after version")
+		if bytesRead == 0 {
+			return offset, errDeserialize("unexpected end of " +
+				"data during decoding (tx version)")
 		}
+		offset += bytesRead
 
 		stxo.txVersion = uint16(txVersion)
 
 		if stxo.txType == stake.TxTypeSStx {
-			sz := readDeserializeSizeOfMinimalOutputs(serialized[offset:])
-			if sz == 0 || sz > len(serialized[offset:]) {
-				return offset, errDeserialize("corrupt data for ticket " +
-					"fully spent stxo stakeextra")
+			sz, err := readDeserializeSizeOfMinimalOutputs(serialized[offset:])
+			if err != nil {
+				return offset + sz, errDeserialize(fmt.Sprintf("unable to decode "+
+					"ticket outputs: %v", err))
 			}
-
 			stakeExtra := make([]byte, sz)
 			copy(stakeExtra, serialized[offset:offset+sz])
 			stxo.stakeExtra = stakeExtra
@@ -648,14 +647,12 @@ func decodeSpentTxOut(serialized []byte, stxo *spentTxOut, amount int64, height 
 // Since the serialization format is not self describing, as noted in the
 // format comments, this function also requires the transactions that spend the
 // txouts and a utxo view that contains any remaining existing utxos in the
-// transactions referenced by the inputs to the passed transasctions.
+// transactions referenced by the inputs to the passed transactions.
 func deserializeSpendJournalEntry(serialized []byte, txns []*wire.MsgTx) ([]spentTxOut, error) {
 	// Calculate the total number of stxos.
 	var numStxos int
 	for _, tx := range txns {
-		txType := stake.DetermineTxType(tx)
-
-		if txType == stake.TxTypeSSGen {
+		if stake.IsSSGen(tx) {
 			numStxos++
 			continue
 		}
@@ -683,13 +680,13 @@ func deserializeSpendJournalEntry(serialized []byte, txns []*wire.MsgTx) ([]spen
 	stxos := make([]spentTxOut, numStxos)
 	for txIdx := len(txns) - 1; txIdx > -1; txIdx-- {
 		tx := txns[txIdx]
-		txType := stake.DetermineTxType(tx)
+		isVote := stake.IsSSGen(tx)
 
 		// Loop backwards through all of the transaction inputs and read
 		// the associated stxo.
 		for txInIdx := len(tx.TxIn) - 1; txInIdx > -1; txInIdx-- {
-			// Skip stakebase.
-			if txInIdx == 0 && txType == stake.TxTypeSSGen {
+			// Skip stakebase since it has no input.
+			if txInIdx == 0 && isVote {
 				continue
 			}
 
@@ -737,7 +734,7 @@ func serializeSpendJournalEntry(stxos []spentTxOut) ([]byte, error) {
 
 	// Calculate the size needed to serialize the entire journal entry.
 	var size int
-	var sizes []int
+	sizes := make([]int, 0, len(stxos))
 	for i := range stxos {
 		sz := spentTxOutSerializeSize(&stxos[i])
 		sizes = append(sizes, sz)
@@ -767,17 +764,16 @@ func serializeSpendJournalEntry(stxos []spentTxOut) ([]byte, error) {
 // view MUST have the utxos referenced by all of the transactions available for
 // the passed block since that information is required to reconstruct the spent
 // txouts.
-func dbFetchSpendJournalEntry(dbTx database.Tx, block *dcrutil.Block, parent *dcrutil.Block) ([]spentTxOut, error) {
+func dbFetchSpendJournalEntry(dbTx database.Tx, block *dcrutil.Block) ([]spentTxOut, error) {
 	// Exclude the coinbase transaction since it can't spend anything.
-	spendBucket := dbTx.Metadata().Bucket(dbnamespace.SpendJournalBucketName)
+	spendBucket := dbTx.Metadata().Bucket(spendJournalBucketName)
 	serialized := spendBucket.Get(block.Hash()[:])
+	msgBlock := block.MsgBlock()
 
-	var blockTxns []*wire.MsgTx
-	if headerApprovesParent(&block.MsgBlock().Header) {
-		blockTxns = append(blockTxns, parent.MsgBlock().Transactions[1:]...)
-	}
-	blockTxns = append(blockTxns, block.MsgBlock().STransactions...)
-
+	blockTxns := make([]*wire.MsgTx, 0, len(msgBlock.STransactions)+
+		len(msgBlock.Transactions[1:]))
+	blockTxns = append(blockTxns, msgBlock.STransactions...)
+	blockTxns = append(blockTxns, msgBlock.Transactions[1:]...)
 	if len(blockTxns) > 0 && len(serialized) == 0 {
 		panicf("missing spend journal data for %s", block.Hash())
 	}
@@ -806,7 +802,7 @@ func dbFetchSpendJournalEntry(dbTx database.Tx, block *dcrutil.Block, parent *dc
 // spent txouts.   The spent txouts slice must contain an entry for every txout
 // the transactions in the block spend in the order they are spent.
 func dbPutSpendJournalEntry(dbTx database.Tx, blockHash *chainhash.Hash, stxos []spentTxOut) error {
-	spendBucket := dbTx.Metadata().Bucket(dbnamespace.SpendJournalBucketName)
+	spendBucket := dbTx.Metadata().Bucket(spendJournalBucketName)
 	serialized, err := serializeSpendJournalEntry(stxos)
 	if err != nil {
 		return err
@@ -817,7 +813,7 @@ func dbPutSpendJournalEntry(dbTx database.Tx, blockHash *chainhash.Hash, stxos [
 // dbRemoveSpendJournalEntry uses an existing database transaction to remove the
 // spend journal entry for the passed block hash.
 func dbRemoveSpendJournalEntry(dbTx database.Tx, blockHash *chainhash.Hash) error {
-	spendBucket := dbTx.Metadata().Bucket(dbnamespace.SpendJournalBucketName)
+	spendBucket := dbTx.Metadata().Bucket(spendJournalBucketName)
 	return spendBucket.Delete(blockHash[:])
 }
 
@@ -1139,7 +1135,7 @@ func deserializeUtxoEntry(serialized []byte) (*UtxoEntry, error) {
 func dbFetchUtxoEntry(dbTx database.Tx, hash *chainhash.Hash) (*UtxoEntry, error) {
 	// Fetch the unspent transaction output information for the passed
 	// transaction hash.  Return now when there is no entry.
-	utxoBucket := dbTx.Metadata().Bucket(dbnamespace.UtxoSetBucketName)
+	utxoBucket := dbTx.Metadata().Bucket(utxoSetBucketName)
 	serializedUtxo := utxoBucket.Get(hash[:])
 	if serializedUtxo == nil {
 		return nil, nil
@@ -1171,12 +1167,68 @@ func dbFetchUtxoEntry(dbTx database.Tx, hash *chainhash.Hash) (*UtxoEntry, error
 	return entry, nil
 }
 
+// dbFetchUxtoStats fetches statistics on the current unspent trnsaction output set.
+func dbFetchUtxoStats(dbTx database.Tx) (*UtxoStats, error) {
+	utxoBucket := dbTx.Metadata().Bucket(utxoSetBucketName)
+
+	var stats UtxoStats
+	transactions := make(map[chainhash.Hash]int64)
+	leaves := make([]chainhash.Hash, 0)
+	cursor := utxoBucket.Cursor()
+
+	for ok := cursor.First(); ok; ok = cursor.Next() {
+		key := cursor.Key()
+		hash := chainhash.HashH(key)
+		serializedUtxo := cursor.Value()
+		entrySize := len(serializedUtxo)
+
+		// A non-nil zero-length entry means there is an entry in the database
+		// for a fully spent transaction which should never be the case.
+		if entrySize == 0 {
+			return nil, AssertError(fmt.Sprintf("database contains entry "+
+				"for fully spent tx %s", hash))
+		}
+
+		stats.Utxos++
+		stats.Size += int64(entrySize)
+		transactions[hash]++
+
+		leaves = append(leaves, chainhash.HashH(serializedUtxo))
+
+		// Deserialize the utxo entry and return it.
+		entry, err := deserializeUtxoEntry(serializedUtxo)
+		if err != nil {
+			// Ensure any deserialization errors are returned as database
+			// corruption errors.
+			if isDeserializeErr(err) {
+				return nil, database.Error{
+					ErrorCode: database.ErrCorruption,
+					Description: fmt.Sprintf("corrupt utxo entry "+
+						"for %v: %v", hash, err),
+				}
+			}
+
+			return nil, err
+		}
+
+		for _, out := range entry.sparseOutputs {
+			stats.Utxos++
+			stats.Total += out.amount
+		}
+	}
+
+	stats.SerializedHash = standalone.CalcMerkleRootInPlace(leaves)
+	stats.Transactions = int64(len(transactions))
+
+	return &stats, nil
+}
+
 // dbPutUtxoView uses an existing database transaction to update the utxo set
 // in the database based on the provided utxo view contents and state.  In
 // particular, only the entries that have been marked as modified are written
 // to the database.
 func dbPutUtxoView(dbTx database.Tx, view *UtxoViewpoint) error {
-	utxoBucket := dbTx.Metadata().Bucket(dbnamespace.UtxoSetBucketName)
+	utxoBucket := dbTx.Metadata().Bucket(utxoSetBucketName)
 	for txHashIter, entry := range view.entries {
 		// No need to update the database if the entry was not modified.
 		if entry == nil || !entry.modified {
@@ -1216,6 +1268,59 @@ func dbPutUtxoView(dbTx database.Tx, view *UtxoViewpoint) error {
 }
 
 // -----------------------------------------------------------------------------
+// The GCS filter journal consists of an entry for each block connected to the
+// main chain (or has ever been connected to it) which consists of a serialized
+// GCS filter.
+//
+// The serialized key format is:
+//
+//   <block hash>
+//
+//   Field           Type              Size
+//   block hash      chainhash.Hash    chainhash.HashSize
+//
+// The serialized value format is:
+//
+//   <serialized filter>
+//
+//   Field           Type                     Size
+//   filter          []byte (gcs.FilterV2)    variable
+//
+// -----------------------------------------------------------------------------
+
+// dbFetchGCSFilter fetches the GCS filter for the passed block and deserializes
+// it into a slice of spent txout entries.
+//
+// When there is no entry for the provided hash, nil will be returned for both
+// the filter and the error.
+func dbFetchGCSFilter(dbTx database.Tx, blockHash *chainhash.Hash) (*gcs.FilterV2, error) {
+	filterBucket := dbTx.Metadata().Bucket(gcsFilterBucketName)
+	serialized := filterBucket.Get(blockHash[:])
+	if serialized == nil {
+		return nil, nil
+	}
+
+	filter, err := gcs.FromBytesV2(blockcf2.B, blockcf2.M, serialized)
+	if err != nil {
+		return nil, database.Error{
+			ErrorCode: database.ErrCorruption,
+			Description: fmt.Sprintf("corrupt filter for %v: %v", blockHash,
+				err),
+		}
+	}
+
+	return filter, nil
+}
+
+// dbPutGCSFilter uses an existing database transaction to update the GCS filter
+// for the given block hash using the provided filter.
+func dbPutGCSFilter(dbTx database.Tx, blockHash *chainhash.Hash, filter *gcs.FilterV2) error {
+	filterBucket := dbTx.Metadata().Bucket(gcsFilterBucketName)
+	serialized := filter.Bytes()
+	return filterBucket.Put(blockHash[:], serialized)
+}
+
+// -----------------------------------------------------------------------------
 // The database information contains information about the version and date
 // of the blockchain database.
 //
@@ -1243,7 +1348,7 @@ func dbPutDatabaseInfo(dbTx database.Tx, dbi *databaseInfo) error {
 	// using the byte order specified by the database namespace.
 	uint32Bytes := func(ui32 uint32) []byte {
 		var b [4]byte
-		dbnamespace.ByteOrder.PutUint32(b[:], ui32)
+		byteOrder.PutUint32(b[:], ui32)
 		return b[:]
 	}
 
@@ -1251,35 +1356,32 @@ func dbPutDatabaseInfo(dbTx database.Tx, dbi *databaseInfo) error {
 	// using the byte order specified by the database namespace.
 	uint64Bytes := func(ui64 uint64) []byte {
 		var b [8]byte
-		dbnamespace.ByteOrder.PutUint64(b[:], ui64)
+		byteOrder.PutUint64(b[:], ui64)
 		return b[:]
 	}
 
 	// Store the database version.
 	meta := dbTx.Metadata()
-	bucket := meta.Bucket(dbnamespace.BCDBInfoBucketName)
-	err := bucket.Put(dbnamespace.BCDBInfoVersionKeyName,
-		uint32Bytes(dbi.version))
+	bucket := meta.Bucket(bcdbInfoBucketName)
+	err := bucket.Put(bcdbInfoVersionKeyName, uint32Bytes(dbi.version))
 	if err != nil {
 		return err
 	}
 
 	// Store the compression version.
-	err = bucket.Put(dbnamespace.BCDBInfoCompressionVersionKeyName,
-		uint32Bytes(dbi.compVer))
+	err = bucket.Put(bcdbInfoCompressionVerKeyName, uint32Bytes(dbi.compVer))
 	if err != nil {
 		return err
 	}
 
 	// Store the block index version.
-	err = bucket.Put(dbnamespace.BCDBInfoBlockIndexVersionKeyName,
-		uint32Bytes(dbi.bidxVer))
+	err = bucket.Put(bcdbInfoBlockIndexVerKeyName, uint32Bytes(dbi.bidxVer))
 	if err != nil {
 		return err
 	}
 
 	// Store the database creation date.
-	return bucket.Put(dbnamespace.BCDBInfoCreatedKeyName,
+	return bucket.Put(bcdbInfoCreatedKeyName,
 		uint64Bytes(uint64(dbi.created.Unix())))
 }
 
@@ -1287,7 +1389,7 @@ func dbPutDatabaseInfo(dbTx database.Tx, dbi *databaseInfo) error {
 // database versioning and creation information.
 func dbFetchDatabaseInfo(dbTx database.Tx) (*databaseInfo, error) {
 	meta := dbTx.Metadata()
-	bucket := meta.Bucket(dbnamespace.BCDBInfoBucketName)
+	bucket := meta.Bucket(bcdbInfoBucketName)
 
 	// Uninitialized state.
 	if bucket == nil {
@@ -1296,30 +1398,30 @@ func dbFetchDatabaseInfo(dbTx database.Tx) (*databaseInfo, error) {
 
 	// Load the database version.
 	var version uint32
-	versionBytes := bucket.Get(dbnamespace.BCDBInfoVersionKeyName)
+	versionBytes := bucket.Get(bcdbInfoVersionKeyName)
 	if versionBytes != nil {
-		version = dbnamespace.ByteOrder.Uint32(versionBytes)
+		version = byteOrder.Uint32(versionBytes)
 	}
 
 	// Load the database compression version.
 	var compVer uint32
-	compVerBytes := bucket.Get(dbnamespace.BCDBInfoCompressionVersionKeyName)
+	compVerBytes := bucket.Get(bcdbInfoCompressionVerKeyName)
 	if compVerBytes != nil {
-		compVer = dbnamespace.ByteOrder.Uint32(compVerBytes)
+		compVer = byteOrder.Uint32(compVerBytes)
 	}
 
 	// Load the database block index version.
 	var bidxVer uint32
-	bidxVerBytes := bucket.Get(dbnamespace.BCDBInfoBlockIndexVersionKeyName)
+	bidxVerBytes := bucket.Get(bcdbInfoBlockIndexVerKeyName)
 	if bidxVerBytes != nil {
-		bidxVer = dbnamespace.ByteOrder.Uint32(bidxVerBytes)
+		bidxVer = byteOrder.Uint32(bidxVerBytes)
 	}
 
 	// Load the database creation date.
 	var created time.Time
-	createdBytes := bucket.Get(dbnamespace.BCDBInfoCreatedKeyName)
+	createdBytes := bucket.Get(bcdbInfoCreatedKeyName)
 	if createdBytes != nil {
-		ts := dbnamespace.ByteOrder.Uint64(createdBytes)
+		ts := byteOrder.Uint64(createdBytes)
 		created = time.Unix(int64(ts), 0)
 	}
 
@@ -1373,17 +1475,17 @@ func serializeBestChainState(state bestChainState) []byte {
 	serializedData := make([]byte, serializedLen)
 	copy(serializedData[0:chainhash.HashSize], state.hash[:])
 	offset := uint32(chainhash.HashSize)
-	dbnamespace.ByteOrder.PutUint32(serializedData[offset:], state.height)
+	byteOrder.PutUint32(serializedData[offset:], state.height)
 	offset += 4
-	dbnamespace.ByteOrder.PutUint64(serializedData[offset:], state.totalTxns)
+	byteOrder.PutUint64(serializedData[offset:], state.totalTxns)
 	offset += 8
-	dbnamespace.ByteOrder.PutUint64(serializedData[offset:],
+	byteOrder.PutUint64(serializedData[offset:],
 		uint64(state.totalSubsidy))
 	offset += 8
-	dbnamespace.ByteOrder.PutUint32(serializedData[offset:], workSumBytesLen)
+	byteOrder.PutUint32(serializedData[offset:], workSumBytesLen)
 	offset += 4
 	copy(serializedData[offset:], workSumBytes)
-	return serializedData[:]
+	return serializedData
 }
 
 // deserializeBestChainState deserializes the passed serialized best chain
@@ -1406,15 +1508,15 @@ func deserializeBestChainState(serializedData []byte) (bestChainState, error) {
 	state := bestChainState{}
 	copy(state.hash[:], serializedData[0:chainhash.HashSize])
 	offset := uint32(chainhash.HashSize)
-	state.height = dbnamespace.ByteOrder.Uint32(serializedData[offset : offset+4])
+	state.height = byteOrder.Uint32(serializedData[offset : offset+4])
 	offset += 4
-	state.totalTxns = dbnamespace.ByteOrder.Uint64(
+	state.totalTxns = byteOrder.Uint64(
 		serializedData[offset : offset+8])
 	offset += 8
-	state.totalSubsidy = int64(dbnamespace.ByteOrder.Uint64(
+	state.totalSubsidy = int64(byteOrder.Uint64(
 		serializedData[offset : offset+8]))
 	offset += 8
-	workSumBytesLen := dbnamespace.ByteOrder.Uint32(
+	workSumBytesLen := byteOrder.Uint32(
 		serializedData[offset : offset+4])
 	offset += 4
 
@@ -1446,7 +1548,17 @@ func dbPutBestState(dbTx database.Tx, snapshot *BestState, workSum *big.Int) err
 	})
 
 	// Store the current best chain state into the database.
-	return dbTx.Metadata().Put(dbnamespace.ChainStateKeyName, serializedData)
+	return dbTx.Metadata().Put(chainStateKeyName, serializedData)
+}
+
+// dbFetchBestState uses an existing database transaction to fetch the best
+// chain state.
+func dbFetchBestState(dbTx database.Tx) (bestChainState, error) {
+	// Fetch the stored chain state from the database metadata.
+	meta := dbTx.Metadata()
+	serializedData := meta.Get(chainStateKeyName)
+	log.Tracef("Serialized chain state: %x", serializedData)
+	return deserializeBestChainState(serializedData)
 }
 
 // createChainState initializes both the database and the chain state to the
@@ -1457,7 +1569,7 @@ func (b *BlockChain) createChainState() error {
 	genesisBlock := dcrutil.NewBlock(b.chainParams.GenesisBlock)
 	header := &genesisBlock.MsgBlock().Header
 	node := newBlockNode(header, nil)
-	node.status = statusDataStored | statusValid
+	node.status = statusDataStored | statusValidated
 
 	// Initialize the state related to the best block.  Since it is the
 	// genesis block, use its timestamp for the median time.
@@ -1474,7 +1586,7 @@ func (b *BlockChain) createChainState() error {
 
 		// Create the bucket that houses information about the database's
 		// creation and version.
-		_, err := meta.CreateBucket(dbnamespace.BCDBInfoBucketName)
+		_, err := meta.CreateBucket(bcdbInfoBucketName)
 		if err != nil {
 			return err
 		}
@@ -1491,13 +1603,13 @@ func (b *BlockChain) createChainState() error {
 		}
 
 		// Create the bucket that houses the block index data.
-		_, err = meta.CreateBucket(dbnamespace.BlockIndexBucketName)
+		_, err = meta.CreateBucket(blockIndexBucketName)
 		if err != nil {
 			return err
 		}
 
 		// Create the bucket that houses the spend journal data.
-		_, err = meta.CreateBucket(dbnamespace.SpendJournalBucketName)
+		_, err = meta.CreateBucket(spendJournalBucketName)
 		if err != nil {
 			return err
 		}
@@ -1505,7 +1617,7 @@ func (b *BlockChain) createChainState() error {
 		// Create the bucket that houses the utxo set.  Note that the
 		// genesis block coinbase transaction is intentionally not
 		// inserted here since it is not spendable by consensus rules.
-		_, err = meta.CreateBucket(dbnamespace.UtxoSetBucketName)
+		_, err = meta.CreateBucket(utxoSetBucketName)
 		if err != nil {
 			return err
 		}
@@ -1524,36 +1636,121 @@ func (b *BlockChain) createChainState() error {
 
 		// Initialize the stake buckets in the database, along with
 		// the best state for the stake database.
-		_, err = stake.InitDatabaseState(dbTx, b.chainParams)
+		_, err = stake.InitDatabaseState(dbTx, b.chainParams,
+			&b.chainParams.GenesisHash)
 		if err != nil {
 			return err
 		}
 
 		// Store the genesis block into the database.
-		return dbTx.StoreBlock(genesisBlock)
+		err = dbTx.StoreBlock(genesisBlock)
+		if err != nil {
+			return err
+		}
+
+		// Create the bucket that houses the gcs filters.
+		_, err = meta.CreateBucket(gcsFilterBucketName)
+		if err != nil {
+			return err
+		}
+
+		// Store the (empty) GCS filter for the genesis block.
+		genesisFilter, err := blockcf2.Regular(genesisBlock.MsgBlock(), nil)
+		if err != nil {
+			return err
+		}
+		return dbPutGCSFilter(dbTx, &b.chainParams.GenesisHash, genesisFilter)
 	})
 	return err
+}
+
+// loadBlockIndex loads all of the block index entries from the database and
+// constructs the block index into the provided index parameter.  It is not safe
+// for concurrent access as it is only intended to be used during initialization
+// and database migration.
+func loadBlockIndex(dbTx database.Tx, genesisHash *chainhash.Hash, index *blockIndex) error {
+	// Determine how many blocks will be loaded into the index in order to
+	// allocate the right amount as a single alloc versus a whole bunch of
+	// little ones to reduce pressure on the GC.
+	meta := dbTx.Metadata()
+	blockIndexBucket := meta.Bucket(blockIndexBucketName)
+	var blockCount int32
+	cursor := blockIndexBucket.Cursor()
+	for ok := cursor.First(); ok; ok = cursor.Next() {
+		blockCount++
+	}
+	blockNodes := make([]blockNode, blockCount)
+
+	// Load all of the block index entries and construct the block index
+	// accordingly.
+	//
+	// NOTE: No locks are used on the block index here since this is
+	// initialization code.
+	var i int32
+	var lastNode *blockNode
+	cursor = blockIndexBucket.Cursor()
+	for ok := cursor.First(); ok; ok = cursor.Next() {
+		entry, err := deserializeBlockIndexEntry(cursor.Value())
+		if err != nil {
+			return err
+		}
+		header := &entry.header
+
+		// Determine the parent block node.  Since the block headers are
+		// iterated in order of height, there is a very good chance the
+		// previous header processed is the parent.
+		var parent *blockNode
+		if lastNode == nil {
+			blockHash := header.BlockHash()
+			if blockHash != *genesisHash {
+				return AssertError(fmt.Sprintf("loadBlockIndex: expected "+
+					"first entry in block index to be genesis block, "+
+					"found %s", blockHash))
+			}
+		} else if header.PrevBlock == lastNode.hash {
+			parent = lastNode
+		} else {
+			parent = index.lookupNode(&header.PrevBlock)
+			if parent == nil {
+				return AssertError(fmt.Sprintf("loadBlockIndex: could not "+
+					"find parent for block %s", header.BlockHash()))
+			}
+		}
+
+		// Initialize the block node, connect it, and add it to the block
+		// index.
+		node := &blockNodes[i]
+		initBlockNode(node, header, parent)
+		node.status = entry.status
+		node.votes = entry.voteInfo
+		index.addNode(node)
+
+		lastNode = node
+		i++
+	}
+
+	return nil
 }
 
 // initChainState attempts to load and initialize the chain state from the
 // database.  When the db does not yet contain any chain state, both it and the
 // chain state are initialized to the genesis block.
-func (b *BlockChain) initChainState() error {
+func (b *BlockChain) initChainState(ctx context.Context) error {
 	// Update database versioning scheme if needed.
 	err := b.db.Update(func(dbTx database.Tx) error {
 		// No versioning upgrade is needed if the dbinfo bucket does not
 		// exist or the legacy key does not exist.
-		bucket := dbTx.Metadata().Bucket(dbnamespace.BCDBInfoBucketName)
+		bucket := dbTx.Metadata().Bucket(bcdbInfoBucketName)
 		if bucket == nil {
 			return nil
 		}
-		legacyBytes := bucket.Get(dbnamespace.BCDBInfoBucketName)
+		legacyBytes := bucket.Get(bcdbInfoBucketName)
 		if legacyBytes == nil {
 			return nil
 		}
 
 		// No versioning upgrade is needed if the new version key exists.
-		if bucket.Get(dbnamespace.BCDBInfoVersionKeyName) != nil {
+		if bucket.Get(bcdbInfoVersionKeyName) != nil {
 			return nil
 		}
 
@@ -1570,7 +1767,7 @@ func (b *BlockChain) initChainState() error {
 		}
 
 		// Remove the legacy version information.
-		return bucket.Delete(dbnamespace.BCDBInfoBucketName)
+		return bucket.Delete(bcdbInfoBucketName)
 	})
 	if err != nil {
 		return err
@@ -1586,7 +1783,7 @@ func (b *BlockChain) initChainState() error {
 		}
 
 		// The database bucket for the versioning information is missing.
-		if dbInfo == nil && err == nil {
+		if dbInfo == nil {
 			return nil
 		}
 
@@ -1630,24 +1827,15 @@ func (b *BlockChain) initChainState() error {
 	}
 
 	// Upgrade the database as needed.
-	err = upgradeDB(b.db, b.chainParams, b.dbInfo, b.interrupt)
+	err = upgradeDB(ctx, b.db, b.chainParams, b.dbInfo)
 	if err != nil {
 		return err
 	}
 
 	// Attempt to load the chain state from the database.
 	err = b.db.View(func(dbTx database.Tx) error {
-		// Fetch the stored chain state from the database metadata.
-		// When it doesn't exist, it means the database hasn't been
-		// initialized for use with chain yet, so break out now to allow
-		// that to happen under a writable database transaction.
-		meta := dbTx.Metadata()
-		serializedData := meta.Get(dbnamespace.ChainStateKeyName)
-		if serializedData == nil {
-			return nil
-		}
-		log.Tracef("Serialized chain state: %x", serializedData)
-		state, err := deserializeBestChainState(serializedData)
+		// Fetch the stored best chain state from the database.
+		state, err := dbFetchBestState(dbTx)
 		if err != nil {
 			return err
 		}
@@ -1655,65 +1843,11 @@ func (b *BlockChain) initChainState() error {
 		log.Infof("Loading block index...")
 		bidxStart := time.Now()
 
-		// Determine how many blocks will be loaded into the index in order to
-		// allocate the right amount as a single alloc versus a whole bunch of
-		// littles ones to reduce pressure on the GC.
-		blockIndexBucket := meta.Bucket(dbnamespace.BlockIndexBucketName)
-		var blockCount int32
-		cursor := blockIndexBucket.Cursor()
-		for ok := cursor.First(); ok; ok = cursor.Next() {
-			blockCount++
-		}
-		blockNodes := make([]blockNode, blockCount)
-
-		// Load all of the block index entries and construct the block index
-		// accordingly.
-		//
-		// NOTE: No locks are used on the block index here since this is
-		// initialization code.
-		var i int32
-		var lastNode *blockNode
-		cursor = blockIndexBucket.Cursor()
-		for ok := cursor.First(); ok; ok = cursor.Next() {
-			entry, err := deserializeBlockIndexEntry(cursor.Value())
-			if err != nil {
-				return err
-			}
-			header := &entry.header
-
-			// Determine the parent block node.  Since the block headers are
-			// iterated in order of height, there is a very good chance the
-			// previous header processed is the parent.
-			var parent *blockNode
-			if lastNode == nil {
-				blockHash := header.BlockHash()
-				if blockHash != *b.chainParams.GenesisHash {
-					return AssertError(fmt.Sprintf("initChainState: expected "+
-						"first entry in block index to be genesis block, "+
-						"found %s", blockHash))
-				}
-			} else if header.PrevBlock == lastNode.hash {
-				parent = lastNode
-			} else {
-				parent = b.index.lookupNode(&header.PrevBlock)
-				if parent == nil {
-					return AssertError(fmt.Sprintf("initChainState: could "+
-						"not find parent for block %s", header.BlockHash()))
-				}
-			}
-
-			// Initialize the block node, connect it, and add it to the block
-			// index.
-			node := &blockNodes[i]
-			initBlockNode(node, header, parent)
-			node.status = entry.status
-			node.ticketsVoted = entry.ticketsVoted
-			node.ticketsRevoked = entry.ticketsRevoked
-			node.votes = entry.voteInfo
-			b.index.addNode(node)
-
-			lastNode = node
-			i++
+		// Load all of the block index entries from the database and
+		// construct the block index.
+		err = loadBlockIndex(dbTx, &b.chainParams.GenesisHash, b.index)
+		if err != nil {
+			return err
 		}
 
 		// Set the best chain to the stored best state.
@@ -1723,20 +1857,6 @@ func (b *BlockChain) initChainState() error {
 				"chain tip %s in block index", state.hash))
 		}
 		b.bestChain.SetTip(tip)
-
-		// Ensure all ancestors of the current best chain tip are marked as
-		// valid.  This is necessary due to older software versions not marking
-		// nodes before the final checkpoint as valid.
-		//
-		// Note that the nodes are not marked as modified here, so the database
-		// is not updated unless the node is otherwise modified and written back
-		// out a later point.  Ultimately, the nodes should be updated in the
-		// database accordingly as part of a database upgrade, however, since
-		// the nodes are all in memory, they can be updated very quickly here
-		// without requiring a database version bump.
-		for node := tip; node != nil; node = node.parent {
-			node.status |= statusValid
-		}
 
 		log.Debugf("Block index loaded in %v", time.Since(bidxStart))
 
@@ -1757,13 +1877,13 @@ func (b *BlockChain) initChainState() error {
 		if err != nil {
 			return err
 		}
-		b.mainchainBlockCache[tip.hash] = utilBlock
+		b.mainChainBlockCache[tip.hash] = utilBlock
 		if tip.parent != nil {
 			parentBlock, err := dbFetchBlockByNode(dbTx, tip.parent)
 			if err != nil {
 				return err
 			}
-			b.mainchainBlockCache[tip.parent.hash] = parentBlock
+			b.mainChainBlockCache[tip.parent.hash] = parentBlock
 		}
 
 		// Initialize the state related to the best block.
@@ -1775,6 +1895,17 @@ func (b *BlockChain) initChainState() error {
 		nextStakeDiff, err := b.calcNextRequiredStakeDifficulty(tip)
 		if err != nil {
 			return err
+		}
+
+		// Find the most recent checkpoint.
+		for i := len(b.checkpoints) - 1; i >= 0; i-- {
+			node := b.index.lookupNode(b.checkpoints[i].Hash)
+			if node != nil {
+				log.Debugf("Most recent checkpoint is %s (height %d)",
+					node.hash, node.height)
+				b.checkpointNode = node
+				break
+			}
 		}
 
 		b.stateSnapshot = newBestState(tip, blockSize, numTxns,

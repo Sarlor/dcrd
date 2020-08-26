@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -26,8 +26,8 @@ import (
 	"time"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/database/v2"
+	"github.com/decred/dcrd/dcrutil/v3"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -89,7 +89,7 @@ func loadBlocks(t *testing.T, dataFile string, network wire.CurrencyNet) ([]*dcr
 }
 
 // checkDbError ensures the passed error is a database.Error with an error code
-// that matches the passed  error code.
+// that matches the passed error code.
 func checkDbError(t *testing.T, testName string, gotErr error, wantErrCode database.ErrorCode) bool {
 	dbErr, ok := gotErr.(database.Error)
 	if !ok {
@@ -230,7 +230,7 @@ func testDeleteValues(tc *testContext, bucket database.Bucket, values []keyPair)
 	return true
 }
 
-// testCursorInterface ensures the cursor itnerface is working properly by
+// testCursorInterface ensures the cursor interface is working properly by
 // exercising all of its functions on the passed bucket.
 func testCursorInterface(tc *testContext, bucket database.Bucket) bool {
 	// Ensure a cursor can be obtained for the bucket.
@@ -615,7 +615,7 @@ func rollbackOnPanic(t *testing.T, tx database.Tx) {
 func testMetadataManualTxInterface(tc *testContext) bool {
 	// populateValues tests that populating values works as expected.
 	//
-	// When the writable flag is false, a read-only tranasction is created,
+	// When the writable flag is false, a read-only transaction is created,
 	// standard bucket tests for read-only transactions are performed, and
 	// the Commit function is checked to ensure it fails as expected.
 	//
@@ -729,7 +729,8 @@ func testMetadataManualTxInterface(tc *testContext) bool {
 	deleteValues := func(values []keyPair) bool {
 		tx, err := tc.db.Begin(true)
 		if err != nil {
-
+			tc.t.Errorf("Begin: unexpected error %v", err)
+			return false
 		}
 		defer rollbackOnPanic(tc.t, tx)
 
@@ -1188,7 +1189,7 @@ func testFetchBlockIOMissing(tc *testContext, tx database.Tx) bool {
 
 // testFetchBlockIO ensures all of the block retrieval API functions work as
 // expected for the provide set of blocks.  The blocks must already be stored in
-// the database, or at least stored into the the passed transaction.  It also
+// the database, or at least stored into the passed transaction.  It also
 // tests several error conditions such as ensuring the expected errors are
 // returned when fetching blocks, headers, and regions that don't exist.
 func testFetchBlockIO(tc *testContext, tx database.Tx) bool {
@@ -1397,7 +1398,6 @@ func testFetchBlockIO(tc *testContext, tx database.Tx) bool {
 	if err != nil {
 		tc.t.Errorf("FetchBlockRegions: unexpected error: %v", err)
 		return false
-
 	}
 	if len(allRegionBytes) != len(allBlockRegions) {
 		tc.t.Errorf("FetchBlockRegions: unexpected number of results "+

@@ -1,19 +1,20 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	"github.com/decred/dcrd/blockchain"
-	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/blockchain/v3"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/database/v2"
 )
 
 const blockDbNamePrefix = "blocks"
@@ -53,7 +54,7 @@ func findCandidates(chain *blockchain.BlockChain, latestHash *chainhash.Hash) ([
 		// Set the latest checkpoint to the genesis block if there isn't
 		// already one.
 		latestCheckpoint = &chaincfg.Checkpoint{
-			Hash:   activeNetParams.GenesisHash,
+			Hash:   &activeNetParams.GenesisHash,
 			Height: 0,
 		}
 	}
@@ -130,7 +131,6 @@ func showCandidate(candidateNum int, checkpoint *chaincfg.Checkpoint) {
 
 	fmt.Printf("Candidate %d -- Height: %d, Hash: %v\n", candidateNum,
 		checkpoint.Height, checkpoint.Hash)
-
 }
 
 func main() {
@@ -151,10 +151,11 @@ func main() {
 
 	// Setup chain.  Ignore notifications since they aren't needed for this
 	// util.
-	chain, err := blockchain.New(&blockchain.Config{
-		DB:          db,
-		ChainParams: activeNetParams,
-	})
+	chain, err := blockchain.New(context.Background(),
+		&blockchain.Config{
+			DB:          db,
+			ChainParams: activeNetParams,
+		})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize chain: %v\n", err)
 		return

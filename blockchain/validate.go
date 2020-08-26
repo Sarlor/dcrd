@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2018 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,17 +8,20 @@ package blockchain
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
 	"time"
 
-	"github.com/decred/dcrd/blockchain/stake"
-	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/blockchain/stake/v3"
+	"github.com/decred/dcrd/blockchain/standalone/v2"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/dcrutil"
-	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/database/v2"
+	"github.com/decred/dcrd/dcrutil/v3"
+	"github.com/decred/dcrd/gcs/v2/blockcf2"
+	"github.com/decred/dcrd/txscript/v3"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -42,6 +45,11 @@ const (
 
 	// MaxCoinbaseScriptLen is the maximum length a coinbase script can be.
 	MaxCoinbaseScriptLen = 100
+
+	// maxUniqueCoinbaseNullDataSize is the maximum number of bytes allowed
+	// in the pushed data output of the coinbase output that is used to
+	// ensure the coinbase has a unique hash.
+	maxUniqueCoinbaseNullDataSize = 256
 
 	// medianTimeBlocks is the number of previous blocks which should be
 	// used to calculate the median time used to validate block timestamps.
@@ -79,6 +87,13 @@ const (
 	// submissionOutputIdx is the index of the stake submission output of a
 	// ticket transaction.
 	submissionOutputIdx = 0
+
+	// checkForDuplicateHashes checks for duplicate hashes when validating
+	// blocks.  Because of the rule inserting the height into the second (nonce)
+	// txOut, there should never be a duplicate transaction hash that overwrites
+	// another. However, because there is a 2^128 chance of a collision, the
+	// paranoid user may wish to turn this feature on.
+	checkForDuplicateHashes = false
 )
 
 var (
@@ -98,8 +113,8 @@ func voteBitsApproveParent(voteBits uint16) bool {
 	return dcrutil.IsFlagSet16(voteBits, dcrutil.BlockValid)
 }
 
-// approvesParent returns whether or not the vote bits in the passed header
-// indicate the regular transaction tree of the parent block should be
+// headerApprovesParent returns whether or not the vote bits in the passed
+// header indicate the regular transaction tree of the parent block should be
 // considered valid.
 func headerApprovesParent(header *wire.BlockHeader) bool {
 	return voteBitsApproveParent(header.VoteBits)
@@ -127,42 +142,6 @@ func isNullFraudProof(txIn *wire.TxIn) bool {
 	}
 
 	return true
-}
-
-// IsCoinBaseTx determines whether or not a transaction is a coinbase.  A
-// coinbase is a special transaction created by miners that has no inputs.
-// This is represented in the block chain by a transaction with a single input
-// that has a previous output transaction index set to the maximum value along
-// with a zero hash.
-//
-// This function only differs from IsCoinBase in that it works with a raw wire
-// transaction as opposed to a higher level util transaction.
-func IsCoinBaseTx(msgTx *wire.MsgTx) bool {
-	// A coin base must only have one transaction input.
-	if len(msgTx.TxIn) != 1 {
-		return false
-	}
-
-	// The previous output of a coin base must have a max value index and a
-	// zero hash.
-	prevOut := &msgTx.TxIn[0].PreviousOutPoint
-	if prevOut.Index != math.MaxUint32 || !prevOut.Hash.IsEqual(zeroHash) {
-		return false
-	}
-
-	return true
-}
-
-// IsCoinBase determines whether or not a transaction is a coinbase.  A
-// coinbase is a special transaction created by miners that has no inputs.
-// This is represented in the block chain by a transaction with a single input
-// that has a previous output transaction index set to the maximum value along
-// with a zero hash.
-//
-// This function only differs from IsCoinBaseTx in that it works with a higher
-// level util transaction as opposed to a raw wire transaction.
-func IsCoinBase(tx *dcrutil.Tx) bool {
-	return IsCoinBaseTx(tx.MsgTx())
 }
 
 // IsExpiredTx returns where or not the passed transaction is expired according
@@ -259,7 +238,7 @@ func CheckTransactionSanity(tx *wire.MsgTx, params *chaincfg.Params) error {
 
 	// Coinbase script length must be between min and max length.
 	isVote := stake.IsSSGen(tx)
-	if IsCoinBaseTx(tx) {
+	if standalone.IsCoinBaseTx(tx) {
 		// The referenced outpoint must be null.
 		if !isNullOutpoint(&tx.TxIn[0].PreviousOutPoint) {
 			str := fmt.Sprintf("coinbase transaction did not use " +
@@ -435,6 +414,26 @@ func CheckProofOfStake(block *dcrutil.Block, posLimit int64) error {
 	return checkProofOfStake(block, posLimit)
 }
 
+// standaloneToChainRuleError attempts to convert the passed error from a
+// standalone.RuleError to a blockchain.RuleError with the equivalent code.  The
+// error is simply passed through without modification if it is not a
+// standalone.RuleError, not one of the specifically recognized error codes, or
+// nil.
+func standaloneToChainRuleError(err error) error {
+	// Convert standalone package rule errors to blockchain rule errors.
+	var rErr standalone.RuleError
+	if errors.As(err, &rErr) {
+		switch rErr.ErrorCode {
+		case standalone.ErrUnexpectedDifficulty:
+			return ruleError(ErrUnexpectedDifficulty, rErr.Description)
+		case standalone.ErrHighHash:
+			return ruleError(ErrHighHash, rErr.Description)
+		}
+	}
+
+	return err
+}
+
 // checkProofOfWork ensures the block header bits which indicate the target
 // difficulty is in min/max range and that the block hash is less than the
 // target difficulty as claimed.
@@ -443,42 +442,21 @@ func CheckProofOfStake(block *dcrutil.Block, posLimit int64) error {
 //  - BFNoPoWCheck: The check to ensure the block hash is less than the target
 //    difficulty is not performed.
 func checkProofOfWork(header *wire.BlockHeader, powLimit *big.Int, flags BehaviorFlags) error {
-	// The target difficulty must be larger than zero.
-	target := CompactToBig(header.Bits)
-	if target.Sign() <= 0 {
-		str := fmt.Sprintf("block target difficulty of %064x is too "+
-			"low", target)
-		return ruleError(ErrUnexpectedDifficulty, str)
+	// Only ensure the target difficulty bits are in the valid range when the
+	// the flag to avoid proof of work checks is set.
+	if flags&BFNoPoWCheck == BFNoPoWCheck {
+		err := standalone.CheckProofOfWorkRange(header.Bits, powLimit)
+		return standaloneToChainRuleError(err)
 	}
 
-	// The target difficulty must be less than the maximum allowed.
-	if target.Cmp(powLimit) > 0 {
-		str := fmt.Sprintf("block target difficulty of %064x is "+
-			"higher than max of %064x", target, powLimit)
-		return ruleError(ErrUnexpectedDifficulty, str)
-	}
-
-	// The block hash must be less than the claimed target unless the flag
-	// to avoid proof of work checks is set.
-	if flags&BFNoPoWCheck != BFNoPoWCheck {
-		// The block hash must be less than the claimed target.
-		hash := header.BlockHash()
-		hashNum := HashToBig(&hash)
-		if hashNum.Cmp(target) > 0 {
-			str := fmt.Sprintf("block hash of %064x is higher than"+
-				" expected max of %064x", hashNum, target)
-			return ruleError(ErrHighHash, str)
-		}
-	}
-
-	return nil
-}
-
-// CheckProofOfWork ensures the block header bits which indicate the target
-// difficulty is in min/max range and that the block hash is less than the
-// target difficulty as claimed.
-func CheckProofOfWork(header *wire.BlockHeader, powLimit *big.Int) error {
-	return checkProofOfWork(header, powLimit, BFNone)
+	// Perform all proof of work checks when the flag is not set:
+	//
+	// - The target difficulty must be larger than zero.
+	// - The target difficulty must be less than the maximum allowed.
+	// - The block hash must be less than the claimed target.
+	blockHash := header.BlockHash()
+	err := standalone.CheckProofOfWork(&blockHash, header.Bits, powLimit)
+	return standaloneToChainRuleError(err)
 }
 
 // checkBlockHeaderSanity performs some preliminary checks on a block header to
@@ -651,14 +629,14 @@ func checkBlockSanity(block *dcrutil.Block, timeSource MedianTimeSource, flags B
 
 	// The first transaction in a block's regular tree must be a coinbase.
 	transactions := block.Transactions()
-	if !IsCoinBaseTx(transactions[0].MsgTx()) {
+	if !standalone.IsCoinBaseTx(transactions[0].MsgTx()) {
 		return ruleError(ErrFirstTxNotCoinbase, "first transaction in "+
 			"block is not a coinbase")
 	}
 
 	// A block must not have more than one coinbase.
 	for i, tx := range transactions[1:] {
-		if IsCoinBaseTx(tx.MsgTx()) {
+		if standalone.IsCoinBaseTx(tx.MsgTx()) {
 			str := fmt.Sprintf("block contains second coinbase at "+
 				"index %d", i+1)
 			return ruleError(ErrMultipleCoinbases, str)
@@ -750,7 +728,7 @@ func checkBlockSanity(block *dcrutil.Block, timeSource MedianTimeSource, flags B
 		return ruleError(ErrTooManyRevocations, errStr)
 	}
 
-	// A block must only contain stake transactions of the the allowed
+	// A block must only contain stake transactions of the allowed
 	// types.
 	//
 	// NOTE: This is not possible to hit at the time this comment was
@@ -777,7 +755,7 @@ func checkBlockSanity(block *dcrutil.Block, timeSource MedianTimeSource, flags B
 		return ruleError(ErrFreshStakeMismatch, errStr)
 	}
 
-	// A block header must commit to the the actual number of votes that are
+	// A block header must commit to the actual number of votes that are
 	// in the block.
 	if int64(header.Voters) != totalVotes {
 		errStr := fmt.Sprintf("block header commitment to %d votes "+
@@ -830,31 +808,6 @@ func checkBlockSanity(block *dcrutil.Block, timeSource MedianTimeSource, flags B
 		}
 	}
 
-	// Build merkle tree and ensure the calculated merkle root matches the
-	// entry in the block header.  This also has the effect of caching all
-	// of the transaction hashes in the block to speed up future hash
-	// checks.  Bitcoind builds the tree here and checks the merkle root
-	// after the following checks, but there is no reason not to check the
-	// merkle root matches here.
-	merkles := BuildMerkleTreeStore(block.Transactions())
-	calculatedMerkleRoot := merkles[len(merkles)-1]
-	if !header.MerkleRoot.IsEqual(calculatedMerkleRoot) {
-		str := fmt.Sprintf("block merkle root is invalid - block "+
-			"header indicates %v, but calculated value is %v",
-			header.MerkleRoot, calculatedMerkleRoot)
-		return ruleError(ErrBadMerkleRoot, str)
-	}
-
-	// Build the stake tx tree merkle root too and check it.
-	merkleStake := BuildMerkleTreeStore(block.STransactions())
-	calculatedStakeMerkleRoot := merkleStake[len(merkleStake)-1]
-	if !header.StakeRoot.IsEqual(calculatedStakeMerkleRoot) {
-		str := fmt.Sprintf("block stake merkle root is invalid - block"+
-			" header indicates %v, but calculated value is %v",
-			header.StakeRoot, calculatedStakeMerkleRoot)
-		return ruleError(ErrBadMerkleRoot, str)
-	}
-
 	// Check for duplicate transactions.  This check will be fairly quick
 	// since the transaction hashes are already cached due to building the
 	// merkle trees above.
@@ -881,7 +834,7 @@ func checkBlockSanity(block *dcrutil.Block, timeSource MedianTimeSource, flags B
 		lastSigOps := totalSigOps
 
 		msgTx := tx.MsgTx()
-		isCoinBase := IsCoinBaseTx(msgTx)
+		isCoinBase := standalone.IsCoinBaseTx(msgTx)
 		isSSGen := stake.IsSSGen(msgTx)
 		totalSigOps += CountSigOps(tx, isCoinBase, isSSGen)
 		if totalSigOps < lastSigOps || totalSigOps > MaxSigOpsPerBlock {
@@ -902,15 +855,17 @@ func CheckBlockSanity(block *dcrutil.Block, timeSource MedianTimeSource, chainPa
 	return checkBlockSanity(block, timeSource, BFNone, chainParams)
 }
 
-// checkBlockHeaderContext peforms several validation checks on the block
-// header which depend on its position within the block chain.
+// checkBlockHeaderPositional performs several validation checks on the block
+// header which depend on its position within the block chain and having the
+// headers of all ancestors available.  These checks do not, and must not, rely
+// on having the full block data of all ancestors available.
 //
 // The flags modify the behavior of this function as follows:
 //  - BFFastAdd: All checks except those involving comparing the header against
-//    the checkpoints are not performed.
+//    the checkpoints and expected height are not performed.
 //
-// This function MUST be called with the chain state lock held (for writes).
-func (b *BlockChain) checkBlockHeaderContext(header *wire.BlockHeader, prevNode *blockNode, flags BehaviorFlags) error {
+// This function MUST be called with the chain state lock held (for reads).
+func (b *BlockChain) checkBlockHeaderPositional(header *wire.BlockHeader, prevNode *blockNode, flags BehaviorFlags) error {
 	// The genesis block is valid by definition.
 	if prevNode == nil {
 		return nil
@@ -932,20 +887,6 @@ func (b *BlockChain) checkBlockHeaderContext(header *wire.BlockHeader, prevNode 
 				" expected value of %d", blockDifficulty,
 				expDiff)
 			return ruleError(ErrUnexpectedDifficulty, str)
-		}
-
-		// Ensure the stake difficulty specified in the block header
-		// matches the calculated difficulty based on the previous block
-		// and difficulty retarget rules.
-		expSDiff, err := b.calcNextRequiredStakeDifficulty(prevNode)
-		if err != nil {
-			return err
-		}
-		if header.SBits != expSDiff {
-			errStr := fmt.Sprintf("block stake difficulty of %d "+
-				"is not the expected value of %d", header.SBits,
-				expSDiff)
-			return ruleError(ErrUnexpectedDifficulty, errStr)
 		}
 
 		// Ensure the timestamp for the block header is after the
@@ -979,26 +920,32 @@ func (b *BlockChain) checkBlockHeaderContext(header *wire.BlockHeader, prevNode 
 		return ruleError(ErrBadCheckpoint, str)
 	}
 
-	// Find the previous checkpoint and prevent blocks which fork the main
-	// chain before it.  This prevents storage of new, otherwise valid,
-	// blocks which build off of old blocks that are likely at a much easier
-	// difficulty and therefore could be used to waste cache and disk space.
-	checkpointNode, err := b.findPreviousCheckpoint()
-	if err != nil {
-		return err
-	}
-	if checkpointNode != nil && blockHeight < checkpointNode.height {
+	// Prevent blocks that fork the main chain before the most recently known
+	// checkpoint.  This prevents storage of new, otherwise valid, blocks which
+	// build off of old blocks that are likely at a much easier difficulty and
+	// therefore could be used to waste cache and disk space.
+	if b.checkpointNode != nil && blockHeight < b.checkpointNode.height {
 		str := fmt.Sprintf("block at height %d forks the main chain "+
 			"before the previous checkpoint at height %d",
-			blockHeight, checkpointNode.height)
+			blockHeight, b.checkpointNode.height)
 		return ruleError(ErrForkTooOld, str)
 	}
 
 	if !fastAdd {
-		// Reject version 5 blocks for networks other than the main
+		// Reject version 6 blocks for networks other than the main
 		// network once a majority of the network has upgraded.
-		if b.chainParams.Net != wire.MainNet && header.Version < 6 &&
-			b.isMajorityVersion(6, prevNode, b.chainParams.BlockRejectNumRequired) {
+		if b.chainParams.Net != wire.MainNet && header.Version < 7 &&
+			b.isMajorityVersion(7, prevNode, b.chainParams.BlockRejectNumRequired) {
+
+			str := "new blocks with version %d are no longer valid"
+			str = fmt.Sprintf(str, header.Version)
+			return ruleError(ErrBlockVersionTooOld, str)
+		}
+
+		// Reject version 5 blocks once a majority of the network has
+		// upgraded.
+		if header.Version < 6 && b.isMajorityVersion(6, prevNode,
+			b.chainParams.BlockRejectNumRequired) {
 
 			str := "new blocks with version %d are no longer valid"
 			str = fmt.Sprintf(str, header.Version)
@@ -1043,6 +990,113 @@ func (b *BlockChain) checkBlockHeaderContext(header *wire.BlockHeader, prevNode 
 			str := "new blocks with version %d are no longer valid"
 			str = fmt.Sprintf(str, header.Version)
 			return ruleError(ErrBlockVersionTooOld, str)
+		}
+	}
+
+	return nil
+}
+
+// checkBlockPositional performs several validation checks on the block which
+// depend on its position within the block chain and having the headers of all
+// ancestors available.  These checks do not, and must not, rely on having the
+// full block data of all ancestors available.
+//
+// The flags modify the behavior of this function as follows:
+//  - BFFastAdd: The transactions are not checked to see if they are expired and
+//    the coinbase height check is not performed.
+//
+// The flags are also passed to checkBlockHeaderPositional.  See its
+// documentation for how the flags modify its behavior.
+func (b *BlockChain) checkBlockPositional(block *dcrutil.Block, prevNode *blockNode, flags BehaviorFlags) error {
+	// The genesis block is valid by definition.
+	if prevNode == nil {
+		return nil
+	}
+
+	// Perform all block header related validation checks that depend on its
+	// position within the block chain and having the headers of all
+	// ancestors available, but do not rely on having the full block data of
+	// all ancestors available.
+	header := &block.MsgBlock().Header
+	err := b.checkBlockHeaderPositional(header, prevNode, flags)
+	if err != nil {
+		return err
+	}
+
+	fastAdd := flags&BFFastAdd == BFFastAdd
+	if !fastAdd {
+		// The height of this block is one more than the referenced
+		// previous block.
+		blockHeight := prevNode.height + 1
+
+		// Ensure all transactions in the block are not expired.
+		for _, tx := range block.Transactions() {
+			if IsExpired(tx, blockHeight) {
+				errStr := fmt.Sprintf("block contains expired regular "+
+					"transaction %v (expiration height %d)", tx.Hash(),
+					tx.MsgTx().Expiry)
+				return ruleError(ErrExpiredTx, errStr)
+			}
+		}
+		for _, stx := range block.STransactions() {
+			if IsExpired(stx, blockHeight) {
+				errStr := fmt.Sprintf("block contains expired stake "+
+					"transaction %v (expiration height %d)", stx.Hash(),
+					stx.MsgTx().Expiry)
+				return ruleError(ErrExpiredTx, errStr)
+			}
+		}
+
+		// Check that the coinbase contains at minimum the block
+		// height in output 1.
+		if blockHeight > 1 {
+			err := checkCoinbaseUniqueHeight(blockHeight, block)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkBlockHeaderContext performs several validation checks on the block
+// header which depend on having the full block data for all of its ancestors
+// available.  This includes checks which depend on tallying the results of
+// votes, because votes are part of the block data.
+//
+// It should be noted that rule changes that have become buried deep enough
+// typically will eventually be transitioned to using well-known activation
+// points for efficiency purposes at which point the associated checks no longer
+// require having direct access to the historical votes, and therefore may be
+// transitioned to checkBlockHeaderPositional at that time.  Conversely, any
+// checks in that function which become conditional based on the results of a
+// vote will necessarily need to be transitioned to this function.
+//
+// The flags modify the behavior of this function as follows:
+//  - BFFastAdd: No check are performed.
+//
+// This function MUST be called with the chain state lock held (for writes).
+func (b *BlockChain) checkBlockHeaderContext(header *wire.BlockHeader, prevNode *blockNode, flags BehaviorFlags) error {
+	// The genesis block is valid by definition.
+	if prevNode == nil {
+		return nil
+	}
+
+	fastAdd := flags&BFFastAdd == BFFastAdd
+	if !fastAdd {
+		// Ensure the stake difficulty specified in the block header
+		// matches the calculated difficulty based on the previous block
+		// and difficulty retarget rules.
+		expSDiff, err := b.calcNextRequiredStakeDifficulty(prevNode)
+		if err != nil {
+			return err
+		}
+		if header.SBits != expSDiff {
+			errStr := fmt.Sprintf("block stake difficulty of %d "+
+				"is not the expected value of %d", header.SBits,
+				expSDiff)
+			return ruleError(ErrUnexpectedDifficulty, errStr)
 		}
 
 		// Enforce the stake version in the header once a majority of
@@ -1092,46 +1146,72 @@ func (b *BlockChain) checkBlockHeaderContext(header *wire.BlockHeader, prevNode 
 // coinbase contains the height encoding to make coinbase hash collisions
 // impossible.
 func checkCoinbaseUniqueHeight(blockHeight int64, block *dcrutil.Block) error {
-	// Coinbase TxOut[0] is always tax, TxOut[1] is always
-	// height + extranonce, so at least two outputs must
-	// exist.
-	if len(block.MsgBlock().Transactions[0].TxOut) < 2 {
-		str := fmt.Sprintf("block %v is missing necessary coinbase "+
-			"outputs", block.Hash())
+	// Coinbase output 0 is the project subsidy, and output 1 is height +
+	// extranonce, so at least two outputs must exist.
+	const minReqOutputs = 2
+	coinbaseTx := block.MsgBlock().Transactions[0]
+	if len(coinbaseTx.TxOut) < minReqOutputs {
+		str := fmt.Sprintf("block %s is missing required coinbase outputs ("+
+			"num outputs: %d, min required: %d)", block.Hash(),
+			len(coinbaseTx.TxOut), minReqOutputs)
 		return ruleError(ErrFirstTxNotCoinbase, str)
 	}
 
 	// Only version 0 scripts are currently valid.
-	nullDataOut := block.MsgBlock().Transactions[0].TxOut[1]
-	if nullDataOut.Version != 0 {
-		str := fmt.Sprintf("block %v output 1 has wrong script version",
-			block.Hash())
+	const scriptVersion = 0
+	nullDataOut := coinbaseTx.TxOut[1]
+	if nullDataOut.Version != scriptVersion {
+		str := fmt.Sprintf("block %s coinbase output 1 script version %d is "+
+			"not the required version %d", block.Hash(), nullDataOut.Version,
+			scriptVersion)
 		return ruleError(ErrFirstTxNotCoinbase, str)
 	}
 
-	// The first 4 bytes of the null data output must be the encoded height
-	// of the block, so that every coinbase created has a unique transaction
-	// hash.
-	nullData, err := txscript.ExtractCoinbaseNullData(nullDataOut.PkScript)
-	if err != nil {
-		str := fmt.Sprintf("block %v output 1 has wrong script type",
-			block.Hash())
+	// The nulldata in the coinbase must be a single OP_RETURN followed by a
+	// data push up to maxUniqueCoinbaseNullDataSize bytes and the first 4 bytes
+	// of that data must be the encoded height of the block so that every
+	// coinbase created has a unique transaction hash.
+	//
+	// NOTE: This is intentionally not using GetScriptClass and the related
+	// functions because those are specifically for standardness checks which
+	// can change over time and this function is enforces consensus rules.
+	//
+	// Also of note is that technically normal nulldata scripts support encoding
+	// numbers via small opcodes, however, for legacy reasons, the consensus
+	// rules require the block height to be encoded as a 4-byte little-endian
+	// uint32 pushed via a normal data push, as opposed to using the normal
+	// number handling semantics of scripts, so this is specialized to
+	// accommodate that.
+	var nullData []byte
+	pkScript := nullDataOut.PkScript
+	if len(pkScript) > 1 && pkScript[0] == txscript.OP_RETURN {
+		tokenizer := txscript.MakeScriptTokenizer(scriptVersion, pkScript[1:])
+		if tokenizer.Next() && tokenizer.Done() && tokenizer.Opcode() <=
+			txscript.OP_PUSHDATA4 {
+
+			nullData = tokenizer.Data()
+		}
+	}
+	if len(nullData) > maxUniqueCoinbaseNullDataSize {
+		str := fmt.Sprintf("block %s coinbase output 1 pushes %d bytes which "+
+			"is more than allowed value of %d", block.Hash(), len(nullData),
+			maxUniqueCoinbaseNullDataSize)
 		return ruleError(ErrFirstTxNotCoinbase, str)
 	}
 	if len(nullData) < 4 {
-		str := fmt.Sprintf("block %v output 1 data push too short to "+
-			"contain height", block.Hash())
+		str := fmt.Sprintf("block %s coinbase output 1 pushes %d bytes which "+
+			"is too short to encode height", block.Hash(), len(nullData))
 		return ruleError(ErrFirstTxNotCoinbase, str)
 	}
 
 	// Check the height and ensure it is correct.
 	cbHeight := binary.LittleEndian.Uint32(nullData[0:4])
 	if cbHeight != uint32(blockHeight) {
-		prevBlock := block.MsgBlock().Header.PrevBlock
-		str := fmt.Sprintf("block %v output 1 has wrong height in "+
-			"coinbase; want %v, got %v; prevBlock %v, header height %v",
-			block.Hash(), blockHeight, cbHeight, prevBlock,
-			block.MsgBlock().Header.Height)
+		header := &block.MsgBlock().Header
+		str := fmt.Sprintf("block %s coinbase output 1 encodes height %d "+
+			"instead of expected height %d (prev block: %s, header height %d)",
+			block.Hash(), cbHeight, uint32(blockHeight), header.PrevBlock,
+			header.Height)
 		return ruleError(ErrCoinbaseHeight, str)
 	}
 
@@ -1196,12 +1276,82 @@ func (b *BlockChain) checkAllowedRevocations(parentStakeNode *stake.Node, block 
 	return nil
 }
 
-// checkBlockContext peforms several validation checks on the block which depend
-// on its position within the block chain.
+// checkMerkleRoots validates the merkle root(s) in the block header match the
+// calculated value(s).
+//
+// Prior to the activation of the header commitments agenda, the regular
+// transaction tree must match the merkle root field and the stake transaction
+// tree must match the stake root field.
+//
+// Conversely, when the header commitments agenda is active, the merkle root
+// field of the header is required to be the root of a merkle tree that has the
+// individual merkle roots of the two transaction trees as leaves.
+//
+// This function MUST be called with the chain state lock held (for writes).
+func (b *BlockChain) checkMerkleRoots(block *wire.MsgBlock, prevNode *blockNode) error {
+	header := &block.Header
+
+	hdrCommitmentsActive, err := b.isHeaderCommitmentsAgendaActive(prevNode)
+	if err != nil {
+		return err
+	}
+	if hdrCommitmentsActive {
+		// Build the two merkle trees and use their calculated merkle roots as
+		// leaves to another merkle tree and ensure the final calculated merkle
+		// root matches the entry in the block header.
+		wantMerkleRoot := standalone.CalcCombinedTxTreeMerkleRoot(
+			block.Transactions, block.STransactions)
+		if header.MerkleRoot != wantMerkleRoot {
+			str := fmt.Sprintf("block merkle root is invalid - block header "+
+				"indicates %v, but calculated value is %v", header.MerkleRoot,
+				wantMerkleRoot)
+			return ruleError(ErrBadMerkleRoot, str)
+		}
+
+		return nil
+	}
+
+	// Fall back to the old behavior.
+
+	// Build merkle tree and ensure the calculated merkle root matches the
+	// entry in the block header.
+	wantMerkleRoot := standalone.CalcTxTreeMerkleRoot(block.Transactions)
+	if header.MerkleRoot != wantMerkleRoot {
+		str := fmt.Sprintf("block merkle root is invalid - block header "+
+			"indicates %v, but calculated value is %v", header.MerkleRoot,
+			wantMerkleRoot)
+		return ruleError(ErrBadMerkleRoot, str)
+	}
+
+	// Build the stake tx tree merkle root too and check it.
+	wantStakeRoot := standalone.CalcTxTreeMerkleRoot(block.STransactions)
+	if header.StakeRoot != wantStakeRoot {
+		str := fmt.Sprintf("block stake merkle root is invalid - block header "+
+			"indicates %v, but calculated value is %v", header.StakeRoot,
+			wantStakeRoot)
+		return ruleError(ErrBadMerkleRoot, str)
+	}
+
+	return nil
+}
+
+// checkBlockContext performs several validation checks on the block which depend
+// on having the full block data for all of its ancestors available.  This
+// includes checks which depend on tallying the results of votes, because votes
+// are part of the block data.
+//
+// It should be noted that rule changes that have become buried deep enough
+// typically will eventually be transitioned to using well-known activation
+// points for efficiency purposes at which point the associated checks no longer
+// require having direct access to the historical votes, and therefore may be
+// transitioned to checkBlockPositional at that time.  Conversely, any checks
+// in that function which become conditional based on the results of a vote will
+// necessarily need to be transitioned to this function.
 //
 // The flags modify the behavior of this function as follows:
-//  - BFFastAdd: The transactions are not checked to see if they are finalized
-//    and the somewhat expensive duplication transaction check is not performed.
+//  - BFFastAdd: The max block size is not checked, transactions are not checked
+//    to see if they are finalized, and the included votes and revocations are
+//    not verified to be allowed.
 //
 // The flags are also passed to checkBlockHeaderContext.  See its documentation
 // for how the flags modify its behavior.
@@ -1211,7 +1361,8 @@ func (b *BlockChain) checkBlockContext(block *dcrutil.Block, prevNode *blockNode
 		return nil
 	}
 
-	// Perform all block header related validation checks.
+	// Perform all block header related validation checks which depend on
+	// having the full block data for all of its ancestors available.
 	header := &block.MsgBlock().Header
 	err := b.checkBlockHeaderContext(header, prevNode, flags)
 	if err != nil {
@@ -1235,6 +1386,13 @@ func (b *BlockChain) checkBlockContext(block *dcrutil.Block, prevNode *blockNode
 			return ruleError(ErrBlockTooBig, str)
 		}
 
+		// The calculated merkle root(s) of the transaction trees must match
+		// the associated entries in the header.
+		err = b.checkMerkleRoots(block.MsgBlock(), prevNode)
+		if err != nil {
+			return err
+		}
+
 		// Switch to using the past median time of the block prior to
 		// the block being checked for all checks related to lock times
 		// once the stake vote for the agenda is active.
@@ -1251,21 +1409,12 @@ func (b *BlockChain) checkBlockContext(block *dcrutil.Block, prevNode *blockNode
 		// previous block.
 		blockHeight := prevNode.height + 1
 
-		// Ensure all transactions in the block are finalized and are
-		// not expired.
+		// Ensure all transactions in the block are finalized.
 		for _, tx := range block.Transactions() {
 			if !IsFinalizedTransaction(tx, blockHeight, blockTime) {
 				str := fmt.Sprintf("block contains unfinalized regular "+
 					"transaction %v", tx.Hash())
 				return ruleError(ErrUnfinalizedTx, str)
-			}
-
-			// The transaction must not be expired.
-			if IsExpired(tx, blockHeight) {
-				errStr := fmt.Sprintf("block contains expired regular "+
-					"transaction %v (expiration height %d)", tx.Hash(),
-					tx.MsgTx().Expiry)
-				return ruleError(ErrExpiredTx, errStr)
 			}
 		}
 		for _, stx := range block.STransactions() {
@@ -1273,23 +1422,6 @@ func (b *BlockChain) checkBlockContext(block *dcrutil.Block, prevNode *blockNode
 				str := fmt.Sprintf("block contains unfinalized stake "+
 					"transaction %v", stx.Hash())
 				return ruleError(ErrUnfinalizedTx, str)
-			}
-
-			// The transaction must not be expired.
-			if IsExpired(stx, blockHeight) {
-				errStr := fmt.Sprintf("block contains expired stake "+
-					"transaction %v (expiration height %d)", stx.Hash(),
-					stx.MsgTx().Expiry)
-				return ruleError(ErrExpiredTx, errStr)
-			}
-		}
-
-		// Check that the coinbase contains at minimum the block
-		// height in output 1.
-		if blockHeight > 1 {
-			err := checkCoinbaseUniqueHeight(blockHeight, block)
-			if err != nil {
-				return err
 			}
 		}
 
@@ -1329,17 +1461,17 @@ func (b *BlockChain) checkBlockContext(block *dcrutil.Block, prevNode *blockNode
 // Decred: Check the stake transactions to make sure they don't have this txid
 // too.
 func (b *BlockChain) checkDupTxs(txSet []*dcrutil.Tx, view *UtxoViewpoint) error {
-	if !chaincfg.CheckForDuplicateHashes {
+	if !checkForDuplicateHashes {
 		return nil
 	}
 
 	// Fetch utxo details for all of the transactions in this block.
 	// Typically, there will not be any utxos for any of the transactions.
-	fetchSet := make(map[chainhash.Hash]struct{})
+	filteredSet := make(viewFilteredSet)
 	for _, tx := range txSet {
-		fetchSet[*tx.Hash()] = struct{}{}
+		filteredSet.add(view, tx.Hash())
 	}
-	err := view.fetchUtxos(b.db, fetchSet)
+	err := view.fetchUtxosMain(b.db, filteredSet)
 	if err != nil {
 		return err
 	}
@@ -1406,7 +1538,7 @@ func isStakeScriptHash(script []byte, stakeOpcode byte) bool {
 }
 
 // isAllowedTicketInputScriptForm returns whether or not the passed public key
-// script is a one of the allowed forms for a ticket input.
+// script is one of the allowed forms for a ticket input.
 func isAllowedTicketInputScriptForm(script []byte) bool {
 	return isPubKeyHash(script) || isScriptHash(script) ||
 		isStakePubKeyHash(script, txscript.OP_SSGEN) ||
@@ -1636,7 +1768,7 @@ func checkTicketRedeemerCommitments(ticketHash *chainhash.Hash, ticketOuts []*st
 	}
 	contributionSumBig := big.NewInt(contributionSum)
 
-	// The outputs that satisify the commitments of the ticket start at offset
+	// The outputs that satisfy the commitments of the ticket start at offset
 	// 2 for votes while they start at 0 for revocations.  Also, the payments
 	// must be tagged with the appropriate stake opcode depending on whether it
 	// is a vote or a revocation.  Finally, the fee limits in the original
@@ -1704,7 +1836,7 @@ func checkTicketRedeemerCommitments(ticketHash *chainhash.Hash, ticketOuts []*st
 		// revocations).
 		//
 		// It should be noted that, due to the scaling, the sum of the generated
-		// amounts for mult-participant votes might be a few atoms less than
+		// amounts for multi-participant votes might be a few atoms less than
 		// the full amount and the difference is treated as a standard
 		// transaction fee.
 		commitmentAmt := extractTicketCommitAmount(commitmentScript)
@@ -1713,7 +1845,7 @@ func checkTicketRedeemerCommitments(ticketHash *chainhash.Hash, ticketOuts []*st
 
 		// Ensure the amount paid adheres to the commitment while taking into
 		// account any fee limits that might be imposed.  The output amount must
-		// exactly match the calculated amount when when not encumbered with a
+		// exactly match the calculated amount when not encumbered with a
 		// fee limit.  On the other hand, when it is encumbered, it must be
 		// between the minimum amount imposed by the fee limit and the
 		// calculated amount.
@@ -1779,7 +1911,7 @@ func checkTicketRedeemerCommitments(ticketHash *chainhash.Hash, ticketOuts []*st
 //
 // NOTE: The caller MUST have already determined that the provided transaction
 // is a vote.
-func checkVoteInputs(subsidyCache *SubsidyCache, tx *dcrutil.Tx, txHeight int64, view *UtxoViewpoint, params *chaincfg.Params) error {
+func checkVoteInputs(subsidyCache *standalone.SubsidyCache, tx *dcrutil.Tx, txHeight int64, view *UtxoViewpoint, params *chaincfg.Params) error {
 	ticketMaturity := int64(params.TicketMaturity)
 	voteHash := tx.Hash()
 	msgTx := tx.MsgTx()
@@ -1792,8 +1924,7 @@ func checkVoteInputs(subsidyCache *SubsidyCache, tx *dcrutil.Tx, txHeight int64,
 	// is voting on.  Unfortunately, this is now part of consensus, so changing
 	// it requires a hard fork vote.
 	_, heightVotingOn := stake.SSGenBlockVotedOn(msgTx)
-	voteSubsidy := CalcStakeVoteSubsidy(subsidyCache, int64(heightVotingOn),
-		params)
+	voteSubsidy := subsidyCache.CalcStakeVoteSubsidy(int64(heightVotingOn))
 
 	// The input amount specified by the stakebase must commit to the subsidy
 	// generated by the vote.
@@ -1819,7 +1950,7 @@ func checkVoteInputs(subsidyCache *SubsidyCache, tx *dcrutil.Tx, txHeight int64,
 	ticketHash := &ticketIn.PreviousOutPoint.Hash
 	ticketUtxo := view.LookupEntry(ticketHash)
 	if ticketUtxo == nil || ticketUtxo.IsFullySpent() {
-		str := fmt.Sprintf("ticket output %v referenced by vote %s:%d  either "+
+		str := fmt.Sprintf("ticket output %v referenced by vote %s:%d either "+
 			"does not exist or has already been spent",
 			ticketIn.PreviousOutPoint, voteHash, ticketInIdx)
 		return ruleError(ErrMissingTxOut, str)
@@ -1986,9 +2117,10 @@ func checkRevocationInputs(tx *dcrutil.Tx, txHeight int64, view *UtxoViewpoint, 
 //
 // NOTE: The transaction MUST have already been sanity checked with the
 // CheckTransactionSanity function prior to calling this function.
-func CheckTransactionInputs(subsidyCache *SubsidyCache, tx *dcrutil.Tx, txHeight int64, view *UtxoViewpoint, checkFraudProof bool, chainParams *chaincfg.Params) (int64, error) {
+func CheckTransactionInputs(subsidyCache *standalone.SubsidyCache, tx *dcrutil.Tx, txHeight int64, view *UtxoViewpoint, checkFraudProof bool, chainParams *chaincfg.Params) (int64, error) {
 	// Coinbase transactions have no inputs.
-	if IsCoinBase(tx) {
+	msgTx := tx.MsgTx()
+	if standalone.IsCoinBaseTx(msgTx) {
 		return 0, nil
 	}
 
@@ -1999,7 +2131,6 @@ func CheckTransactionInputs(subsidyCache *SubsidyCache, tx *dcrutil.Tx, txHeight
 	// Perform additional checks on ticket purchase transactions such as
 	// ensuring the input type requirements are met and the output commitments
 	// coincide with the inputs.
-	msgTx := tx.MsgTx()
 	isTicket := stake.IsSStx(msgTx)
 	if isTicket {
 		if err := checkTicketPurchaseInputs(msgTx, view); err != nil {
@@ -2007,7 +2138,7 @@ func CheckTransactionInputs(subsidyCache *SubsidyCache, tx *dcrutil.Tx, txHeight
 		}
 	}
 
-	// Perform additional checks on vote transactions such as verying that the
+	// Perform additional checks on vote transactions such as verifying that the
 	// referenced ticket exists, the stakebase input commits to correct subsidy,
 	// the output amounts adhere to the commitments of the referenced ticket,
 	// and the ticket maturity requirements are met.
@@ -2047,8 +2178,8 @@ func CheckTransactionInputs(subsidyCache *SubsidyCache, tx *dcrutil.Tx, txHeight
 		if isVote && idx == 0 {
 			// However, do add the reward amount.
 			_, heightVotingOn := stake.SSGenBlockVotedOn(msgTx)
-			stakeVoteSubsidy := CalcStakeVoteSubsidy(subsidyCache,
-				int64(heightVotingOn), chainParams)
+			stakeVoteSubsidy := subsidyCache.CalcStakeVoteSubsidy(
+				int64(heightVotingOn))
 			totalAtomIn += stakeVoteSubsidy
 			continue
 		}
@@ -2156,11 +2287,9 @@ func CheckTransactionInputs(subsidyCache *SubsidyCache, tx *dcrutil.Tx, txHeight
 		// from non votes and revocations and make sure that they spend no
 		// OP_SSTX tagged outputs.
 		if !(isVote || isRevocation) {
-			if txscript.GetScriptClass(
+			if stake.IsTicketPurchaseScript(
 				utxoEntry.ScriptVersionByIndex(originTxIndex),
-				utxoEntry.PkScriptByIndex(originTxIndex)) ==
-				txscript.StakeSubmissionTy {
-
+				utxoEntry.PkScriptByIndex(originTxIndex)) {
 				errSSGen := stake.CheckSSGen(msgTx)
 				errSSRtx := stake.CheckSSRtx(msgTx)
 				errStr := fmt.Sprintf("Tx %v attempted to "+
@@ -2175,11 +2304,12 @@ func CheckTransactionInputs(subsidyCache *SubsidyCache, tx *dcrutil.Tx, txHeight
 
 		// OP_SSGEN and OP_SSRTX tagged outputs can only be spent after
 		// coinbase maturity many blocks.
-		scriptClass := txscript.GetScriptClass(
+		if stake.IsRevocationScript(
 			utxoEntry.ScriptVersionByIndex(originTxIndex),
-			utxoEntry.PkScriptByIndex(originTxIndex))
-		if scriptClass == txscript.StakeGenTy ||
-			scriptClass == txscript.StakeRevocationTy {
+			utxoEntry.PkScriptByIndex(originTxIndex)) ||
+			stake.IsVoteScript(
+				utxoEntry.ScriptVersionByIndex(originTxIndex),
+				utxoEntry.PkScriptByIndex(originTxIndex)) {
 			originHeight := utxoEntry.BlockHeight()
 			blocksSincePrev := txHeight - originHeight
 			if blocksSincePrev <
@@ -2196,7 +2326,9 @@ func CheckTransactionInputs(subsidyCache *SubsidyCache, tx *dcrutil.Tx, txHeight
 
 		// Ticket change outputs may only be spent after ticket change
 		// maturity many blocks.
-		if scriptClass == txscript.StakeSubChangeTy {
+		if stake.IsStakeChangeScript(
+			utxoEntry.ScriptVersionByIndex(originTxIndex),
+			utxoEntry.PkScriptByIndex(originTxIndex)) {
 			originHeight := utxoEntry.BlockHeight()
 			blocksSincePrev := txHeight - originHeight
 			if blocksSincePrev <
@@ -2302,7 +2434,7 @@ func CountSigOps(tx *dcrutil.Tx, isCoinBaseTx bool, isSSGen bool) int {
 // transactions which are of the pay-to-script-hash type.  This uses the
 // precise, signature operation counting mechanism from the script engine which
 // requires access to the input transaction scripts.
-func CountP2SHSigOps(tx *dcrutil.Tx, isCoinBaseTx bool, isStakeBaseTx bool, utxoView *UtxoViewpoint) (int, error) {
+func CountP2SHSigOps(tx *dcrutil.Tx, isCoinBaseTx bool, isStakeBaseTx bool, view *UtxoViewpoint) (int, error) {
 	// Coinbase transactions have no interesting inputs.
 	if isCoinBaseTx {
 		return 0, nil
@@ -2322,7 +2454,7 @@ func CountP2SHSigOps(tx *dcrutil.Tx, isCoinBaseTx bool, isStakeBaseTx bool, utxo
 		// Ensure the referenced input transaction is available.
 		originTxHash := &txIn.PreviousOutPoint.Hash
 		originTxIndex := txIn.PreviousOutPoint.Index
-		utxoEntry := utxoView.LookupEntry(originTxHash)
+		utxoEntry := view.LookupEntry(originTxHash)
 		if utxoEntry == nil || utxoEntry.IsOutputSpent(originTxIndex) {
 			str := fmt.Sprintf("output %v referenced from "+
 				"transaction %s:%d either does not exist or "+
@@ -2341,8 +2473,7 @@ func CountP2SHSigOps(tx *dcrutil.Tx, isCoinBaseTx bool, isStakeBaseTx bool, utxo
 		// Count the precise number of signature operations in the
 		// referenced public key script.
 		sigScript := txIn.SignatureScript
-		numSigOps := txscript.GetPreciseSigOpCount(sigScript, pkScript,
-			true)
+		numSigOps := txscript.GetPreciseSigOpCount(sigScript, pkScript)
 
 		// We could potentially overflow the accumulator so check for
 		// overflow.
@@ -2359,11 +2490,66 @@ func CountP2SHSigOps(tx *dcrutil.Tx, isCoinBaseTx bool, isStakeBaseTx bool, utxo
 	return totalSigOps, nil
 }
 
+// createLegacySeqLockView returns a view to use when calculating sequence locks
+// for the transactions in the regular tree that preserves the same incorrect
+// semantics that were present in previous versions of the software.
+func (b *BlockChain) createLegacySeqLockView(block, parent *dcrutil.Block, view *UtxoViewpoint) (*UtxoViewpoint, error) {
+	// Clone the real view to avoid mutating it.
+	seqLockView := view.clone()
+
+	// Ensure all of the inputs referenced by the transactions in the regular
+	// tree of the parent block and the parent block outputs are available in
+	// the legacy view so long as it has not been disapproved.
+	if headerApprovesParent(&block.MsgBlock().Header) {
+		err := seqLockView.fetchRegularInputUtxos(b.db, parent)
+		if err != nil {
+			return nil, err
+		}
+
+		for txInIdx, tx := range parent.Transactions() {
+			seqLockView.AddTxOuts(tx, parent.Height(), uint32(txInIdx))
+		}
+	}
+
+	// Ensure all of the inputs referenced by the transactions in the stake tree
+	// of the current block are available in the legacy view.
+	filteredSet := make(viewFilteredSet)
+	for _, stx := range block.STransactions() {
+		isVote := stake.IsSSGen(stx.MsgTx())
+		for txInIdx, txIn := range stx.MsgTx().TxIn {
+			// Ignore stakebase since it has no input.
+			if txInIdx == 0 && isVote {
+				continue
+			}
+
+			// Only request entries that are not already in the view from the
+			// database.
+			originHash := &txIn.PreviousOutPoint.Hash
+			filteredSet.add(seqLockView, originHash)
+		}
+	}
+	err := seqLockView.fetchUtxosMain(b.db, filteredSet)
+	if err != nil {
+		return nil, err
+	}
+
+	// Connect all of the transactions in the stake tree of the current block.
+	for txIdx, stx := range block.STransactions() {
+		err := seqLockView.connectTransaction(stx, block.Height(),
+			uint32(txIdx), nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return seqLockView, nil
+}
+
 // checkNumSigOps Checks the number of P2SH signature operations to make
 // sure they don't overflow the limits.  It takes a cumulative number of sig
 // ops as an argument and increments will each call.
 // TxTree true == Regular, false == Stake
-func checkNumSigOps(tx *dcrutil.Tx, utxoView *UtxoViewpoint, index int, txTree bool, cumulativeSigOps int) (int, error) {
+func checkNumSigOps(tx *dcrutil.Tx, view *UtxoViewpoint, index int, txTree bool, cumulativeSigOps int) (int, error) {
 	msgTx := tx.MsgTx()
 	isSSGen := stake.IsSSGen(msgTx)
 	numsigOps := CountSigOps(tx, (index == 0) && txTree, isSSGen)
@@ -2374,7 +2560,7 @@ func checkNumSigOps(tx *dcrutil.Tx, utxoView *UtxoViewpoint, index int, txTree b
 	// transaction is a coinbase transaction rather than having to do a
 	// full coinbase check again.
 	numP2SHSigOps, err := CountP2SHSigOps(tx, (index == 0) && txTree,
-		isSSGen, utxoView)
+		isSSGen, view)
 	if err != nil {
 		log.Tracef("CountP2SHSigOps failed; error returned %v", err)
 		return 0, err
@@ -2400,13 +2586,13 @@ func checkNumSigOps(tx *dcrutil.Tx, utxoView *UtxoViewpoint, index int, txTree b
 // checkStakeBaseAmounts calculates the total amount given as subsidy from
 // single stakebase transactions (votes) within a block.  This function skips a
 // ton of checks already performed by CheckTransactionInputs.
-func checkStakeBaseAmounts(subsidyCache *SubsidyCache, height int64, params *chaincfg.Params, txs []*dcrutil.Tx, utxoView *UtxoViewpoint) error {
+func checkStakeBaseAmounts(subsidyCache *standalone.SubsidyCache, height int64, txs []*dcrutil.Tx, view *UtxoViewpoint) error {
 	for _, tx := range txs {
 		msgTx := tx.MsgTx()
 		if stake.IsSSGen(msgTx) {
 			// Ensure the input is available.
 			txInHash := &msgTx.TxIn[1].PreviousOutPoint.Hash
-			utxoEntry, exists := utxoView.entries[*txInHash]
+			utxoEntry, exists := view.entries[*txInHash]
 			if !exists || utxoEntry == nil {
 				str := fmt.Sprintf("couldn't find input tx %v "+
 					"for stakebase amounts check", txInHash)
@@ -2426,8 +2612,7 @@ func checkStakeBaseAmounts(subsidyCache *SubsidyCache, height int64, params *cha
 
 			// Subsidy aligns with the height we're voting on, not
 			// with the height of the current block.
-			calcSubsidy := CalcStakeVoteSubsidy(subsidyCache,
-				height-1, params)
+			calcSubsidy := subsidyCache.CalcStakeVoteSubsidy(height - 1)
 
 			if difference > calcSubsidy {
 				str := fmt.Sprintf("ssgen tx %v spent more "+
@@ -2444,7 +2629,7 @@ func checkStakeBaseAmounts(subsidyCache *SubsidyCache, height int64, params *cha
 // getStakeBaseAmounts calculates the total amount given as subsidy from the
 // collective stakebase transactions (votes) within a block.  This function
 // skips a ton of checks already performed by CheckTransactionInputs.
-func getStakeBaseAmounts(txs []*dcrutil.Tx, utxoView *UtxoViewpoint) (int64, error) {
+func getStakeBaseAmounts(txs []*dcrutil.Tx, view *UtxoViewpoint) (int64, error) {
 	totalInputs := int64(0)
 	totalOutputs := int64(0)
 	for _, tx := range txs {
@@ -2452,7 +2637,7 @@ func getStakeBaseAmounts(txs []*dcrutil.Tx, utxoView *UtxoViewpoint) (int64, err
 		if stake.IsSSGen(msgTx) {
 			// Ensure the input is available.
 			txInHash := &msgTx.TxIn[1].PreviousOutPoint.Hash
-			utxoEntry, exists := utxoView.entries[*txInHash]
+			utxoEntry, exists := view.entries[*txInHash]
 			if !exists || utxoEntry == nil {
 				str := fmt.Sprintf("couldn't find input tx %v "+
 					"for stakebase amounts get", txInHash)
@@ -2476,7 +2661,7 @@ func getStakeBaseAmounts(txs []*dcrutil.Tx, utxoView *UtxoViewpoint) (int64, err
 
 // getStakeTreeFees determines the amount of fees for in the stake tx tree of
 // some node given a transaction store.
-func getStakeTreeFees(subsidyCache *SubsidyCache, height int64, params *chaincfg.Params, txs []*dcrutil.Tx, utxoView *UtxoViewpoint) (dcrutil.Amount, error) {
+func getStakeTreeFees(subsidyCache *standalone.SubsidyCache, height int64, txs []*dcrutil.Tx, view *UtxoViewpoint) (dcrutil.Amount, error) {
 	totalInputs := int64(0)
 	totalOutputs := int64(0)
 	for _, tx := range txs {
@@ -2490,7 +2675,7 @@ func getStakeTreeFees(subsidyCache *SubsidyCache, height int64, params *chaincfg
 			}
 
 			txInHash := &in.PreviousOutPoint.Hash
-			utxoEntry, exists := utxoView.entries[*txInHash]
+			utxoEntry, exists := view.entries[*txInHash]
 			if !exists || utxoEntry == nil {
 				str := fmt.Sprintf("couldn't find input tx "+
 					"%v for stake tree fee calculation",
@@ -2512,8 +2697,7 @@ func getStakeTreeFees(subsidyCache *SubsidyCache, height int64, params *chaincfg
 		if isSSGen {
 			// Subsidy aligns with the height we're voting on, not
 			// with the height of the current block.
-			totalOutputs -= CalcStakeVoteSubsidy(subsidyCache,
-				height-1, params)
+			totalOutputs -= subsidyCache.CalcStakeVoteSubsidy(height - 1)
 		}
 	}
 
@@ -2530,7 +2714,7 @@ func getStakeTreeFees(subsidyCache *SubsidyCache, height int64, params *chaincfg
 // transaction inputs for a transaction list given a predetermined TxStore.
 // After ensuring the transaction is valid, the transaction is connected to the
 // UTXO viewpoint.  TxTree true == Regular, false == Stake
-func (b *BlockChain) checkTransactionsAndConnect(subsidyCache *SubsidyCache, inputFees dcrutil.Amount, node *blockNode, txs []*dcrutil.Tx, utxoView *UtxoViewpoint, stxos *[]spentTxOut, txTree bool) error {
+func (b *BlockChain) checkTransactionsAndConnect(inputFees dcrutil.Amount, node *blockNode, txs []*dcrutil.Tx, view *UtxoViewpoint, stxos *[]spentTxOut, txTree bool) error {
 	// Perform several checks on the inputs for each transaction.  Also
 	// accumulate the total fees.  This could technically be combined with
 	// the loop above instead of running another loop over the
@@ -2544,8 +2728,8 @@ func (b *BlockChain) checkTransactionsAndConnect(subsidyCache *SubsidyCache, inp
 		// Ensure that the number of signature operations is not beyond
 		// the consensus limit.
 		var err error
-		cumulativeSigOps, err = checkNumSigOps(tx, utxoView, idx,
-			txTree, cumulativeSigOps)
+		cumulativeSigOps, err = checkNumSigOps(tx, view, idx, txTree,
+			cumulativeSigOps)
 		if err != nil {
 			return err
 		}
@@ -2553,7 +2737,7 @@ func (b *BlockChain) checkTransactionsAndConnect(subsidyCache *SubsidyCache, inp
 		// This step modifies the txStore and marks the tx outs used
 		// spent, so be aware of this.
 		txFee, err := CheckTransactionInputs(b.subsidyCache, tx,
-			node.height, utxoView, true, /* check fraud proofs */
+			node.height, view, true, /* check fraud proofs */
 			b.chainParams)
 		if err != nil {
 			log.Tracef("CheckTransactionInputs failed; error "+
@@ -2572,7 +2756,7 @@ func (b *BlockChain) checkTransactionsAndConnect(subsidyCache *SubsidyCache, inp
 
 		// Connect the transaction to the UTXO viewpoint, so that in
 		// flight transactions may correctly validate.
-		err = utxoView.connectTransaction(tx, node.height, uint32(idx),
+		err = view.connectTransaction(tx, node.height, uint32(idx),
 			stxos)
 		if err != nil {
 			return err
@@ -2599,12 +2783,12 @@ func (b *BlockChain) checkTransactionsAndConnect(subsidyCache *SubsidyCache, inp
 
 		var expAtomOut int64
 		if node.height == 1 {
-			expAtomOut = subsidyCache.CalcBlockSubsidy(node.height)
+			expAtomOut = b.subsidyCache.CalcBlockSubsidy(node.height)
 		} else {
-			subsidyWork := CalcBlockWorkSubsidy(subsidyCache,
-				node.height, node.voters, b.chainParams)
-			subsidyTax := CalcBlockTaxSubsidy(subsidyCache,
-				node.height, node.voters, b.chainParams)
+			subsidyWork := b.subsidyCache.CalcWorkSubsidy(node.height,
+				node.voters)
+			subsidyTax := b.subsidyCache.CalcTreasurySubsidy(node.height,
+				node.voters)
 			expAtomOut = subsidyWork + subsidyTax + totalFees
 		}
 
@@ -2638,13 +2822,13 @@ func (b *BlockChain) checkTransactionsAndConnect(subsidyCache *SubsidyCache, inp
 			return ruleError(ErrNoStakeTx, str)
 		}
 
-		err := checkStakeBaseAmounts(subsidyCache, node.height,
-			b.chainParams, txs, utxoView)
+		err := checkStakeBaseAmounts(b.subsidyCache, node.height,
+			txs, view)
 		if err != nil {
 			return err
 		}
 
-		totalAtomOutStake, err := getStakeBaseAmounts(txs, utxoView)
+		totalAtomOutStake, err := getStakeBaseAmounts(txs, view)
 		if err != nil {
 			return err
 		}
@@ -2653,8 +2837,7 @@ func (b *BlockChain) checkTransactionsAndConnect(subsidyCache *SubsidyCache, inp
 		if node.height >= b.chainParams.StakeValidationHeight {
 			// Subsidy aligns with the height we're voting on, not
 			// with the height of the current block.
-			expAtomOut = CalcStakeVoteSubsidy(subsidyCache,
-				node.height-1, b.chainParams) *
+			expAtomOut = b.subsidyCache.CalcStakeVoteSubsidy(node.height-1) *
 				int64(node.voters)
 		} else {
 			expAtomOut = totalFees
@@ -2700,6 +2883,11 @@ func (b *BlockChain) consensusScriptVerifyFlags(node *blockNode) (txscript.Scrip
 // connected and consequently the best hash for the view is also updated to
 // passed block.
 //
+// When the header commitments parameter is not nil, it will be updated with the
+// commitment data created by the function in order to perform validation so
+// the caller is able to reuse it without having to recreate it.  The caller may
+// specify nil if the data is not desired.
+//
 // An example of some of the checks performed are ensuring connecting the block
 // would not cause any duplicate transaction hashes for old transactions that
 // aren't already fully spent, double spends, exceeding the maximum allowed
@@ -2710,7 +2898,7 @@ func (b *BlockChain) consensusScriptVerifyFlags(node *blockNode) (txscript.Scrip
 // the bulk of its work.
 //
 // This function MUST be called with the chain state lock held (for writes).
-func (b *BlockChain) checkConnectBlock(node *blockNode, block, parent *dcrutil.Block, utxoView *UtxoViewpoint, stxos *[]spentTxOut) error {
+func (b *BlockChain) checkConnectBlock(node *blockNode, block, parent *dcrutil.Block, view *UtxoViewpoint, stxos *[]spentTxOut, hdrCommitments *headerCommitmentData) error {
 	// If the side chain blocks end up in the database, a call to
 	// CheckBlockSanity should be done here in case a previous version
 	// allowed a block that is no longer valid.  However, since the
@@ -2719,15 +2907,15 @@ func (b *BlockChain) checkConnectBlock(node *blockNode, block, parent *dcrutil.B
 
 	// Ensure the view is for the node being checked.
 	parentHash := &block.MsgBlock().Header.PrevBlock
-	if !utxoView.BestHash().IsEqual(parentHash) {
+	if !view.BestHash().IsEqual(parentHash) {
 		return AssertError(fmt.Sprintf("inconsistent view when "+
 			"checking block connection: best hash is %v instead "+
-			"of expected %v", utxoView.BestHash(), parentHash))
+			"of expected %v", view.BestHash(), parentHash))
 	}
 
-	// Check that the coinbase pays the tax, if applicable.
-	err := CoinbasePaysTax(b.subsidyCache, block.Transactions()[0], node.height,
-		node.voters, b.chainParams)
+	// Check that the coinbase pays the treasury, if applicable.
+	err := coinbasePaysTreasury(b.subsidyCache, block.Transactions()[0],
+		node.height, node.voters, b.chainParams)
 	if err != nil {
 		return err
 	}
@@ -2738,7 +2926,7 @@ func (b *BlockChain) checkConnectBlock(node *blockNode, block, parent *dcrutil.B
 	// will therefore be detected by the next checkpoint).  This is a huge
 	// optimization because running the scripts is the most time consuming
 	// portion of block handling.
-	checkpoint := b.latestCheckpoint()
+	checkpoint := b.LatestCheckpoint()
 	runScripts := !b.noVerify
 	if checkpoint != nil && node.height <= checkpoint.Height {
 		runScripts = false
@@ -2752,50 +2940,56 @@ func (b *BlockChain) checkConnectBlock(node *blockNode, block, parent *dcrutil.B
 		}
 	}
 
-	// The number of signature operations must be less than the maximum
-	// allowed per block.  Note that the preliminary sanity checks on a
-	// block also include a check similar to this one, but this check
-	// expands the count to include a precise count of pay-to-script-hash
-	// signature operations in each of the input transaction public key
-	// scripts.
-	// Do this for all TxTrees.
-	regularTxTreeValid := voteBitsApproveParent(node.voteBits)
-	thisNodeStakeViewpoint := ViewpointPrevInvalidStake
-	thisNodeRegularViewpoint := ViewpointPrevInvalidRegular
-	if regularTxTreeValid {
-		thisNodeStakeViewpoint = ViewpointPrevValidStake
-		thisNodeRegularViewpoint = ViewpointPrevValidRegular
-
-		utxoView.SetStakeViewpoint(ViewpointPrevValidInitial)
-		err = utxoView.fetchInputUtxos(b.db, block, parent)
+	// Create a view which preserves the expected consensus semantics for
+	// relative lock times via sequence numbers once the stake vote for the
+	// agenda is active.
+	legacySeqLockView := view
+	lnFeaturesActive, err := b.isLNFeaturesAgendaActive(node.parent)
+	if err != nil {
+		return err
+	}
+	fixSeqLocksActive, err := b.isFixSeqLocksAgendaActive(node.parent)
+	if err != nil {
+		return err
+	}
+	if lnFeaturesActive && !fixSeqLocksActive {
+		var err error
+		legacySeqLockView, err = b.createLegacySeqLockView(block, parent,
+			view)
 		if err != nil {
 			return err
 		}
+	}
 
-		for i, tx := range parent.Transactions() {
-			err := utxoView.connectTransaction(tx,
-				node.parent.height, uint32(i), stxos)
-			if err != nil {
-				return err
-			}
+	// Disconnect all of the transactions in the regular transaction tree of
+	// the parent if the block being checked votes against it.
+	if node.height > 1 && !voteBitsApproveParent(node.voteBits) {
+		err := view.disconnectDisapprovedBlock(b.db, parent)
+		if err != nil {
+			return err
 		}
 	}
 
-	// TxTreeStake of current block.
-	utxoView.SetStakeViewpoint(thisNodeStakeViewpoint)
-	err = b.checkDupTxs(block.STransactions(), utxoView)
+	// Ensure the stake transaction tree does not contain any transactions
+	// that 'overwrite' older transactions which are not fully spent.
+	err = b.checkDupTxs(block.STransactions(), view)
 	if err != nil {
 		log.Tracef("checkDupTxs failed for cur TxTreeStake: %v", err)
 		return err
 	}
 
-	err = utxoView.fetchInputUtxos(b.db, block, parent)
+	// Load all of the utxos referenced by the inputs for all transactions
+	// in the block don't already exist in the utxo view from the database.
+	//
+	// These utxo entries are needed for verification of things such as
+	// transaction inputs, counting pay-to-script-hashes, and scripts.
+	err = view.fetchInputUtxos(b.db, block)
 	if err != nil {
 		return err
 	}
 
-	err = b.checkTransactionsAndConnect(b.subsidyCache, 0, node,
-		block.STransactions(), utxoView, stxos, false)
+	err = b.checkTransactionsAndConnect(0, node, block.STransactions(),
+		view, stxos, false)
 	if err != nil {
 		log.Tracef("checkTransactionsAndConnect failed for "+
 			"TxTreeStake: %v", err)
@@ -2803,83 +2997,24 @@ func (b *BlockChain) checkConnectBlock(node *blockNode, block, parent *dcrutil.B
 	}
 
 	stakeTreeFees, err := getStakeTreeFees(b.subsidyCache, node.height,
-		b.chainParams, block.STransactions(), utxoView)
+		block.STransactions(), view)
 	if err != nil {
 		log.Tracef("getStakeTreeFees failed for TxTreeStake: %v", err)
 		return err
 	}
 
-	// Enforce all relative lock times via sequence numbers for the regular
+	// Enforce all relative lock times via sequence numbers for the stake
 	// transaction tree once the stake vote for the agenda is active.
 	var prevMedianTime time.Time
-	lnFeaturesActive, err := b.isLNFeaturesAgendaActive(node.parent)
-	if err != nil {
-		return err
-	}
 	if lnFeaturesActive {
 		// Use the past median time of the *previous* block in order
 		// to determine if the transactions in the current block are
 		// final.
 		prevMedianTime = node.parent.CalcPastMedianTime()
 
-		// Skip the coinbase since it does not have any inputs and thus
-		// lock times do not apply.
-		for _, tx := range block.Transactions()[1:] {
-			sequenceLock, err := b.calcSequenceLock(node, tx,
-				utxoView, true)
-			if err != nil {
-				return err
-			}
-			if !SequenceLockActive(sequenceLock, node.height,
-				prevMedianTime) {
-
-				str := fmt.Sprintf("block contains " +
-					"transaction whose input sequence " +
-					"locks are not met")
-				return ruleError(ErrUnfinalizedTx, str)
-			}
-		}
-	}
-
-	if runScripts {
-		err = checkBlockScripts(block, utxoView, false, scriptFlags,
-			b.sigCache)
-		if err != nil {
-			log.Tracef("checkBlockScripts failed; error returned "+
-				"on txtreestake of cur block: %v", err)
-			return err
-		}
-	}
-
-	// TxTreeRegular of current block. At this point, the stake
-	// transactions have already added, so set this to the correct stake
-	// viewpoint and disable automatic connection.
-	utxoView.SetStakeViewpoint(thisNodeRegularViewpoint)
-	err = b.checkDupTxs(block.Transactions(), utxoView)
-	if err != nil {
-		log.Tracef("checkDupTxs failed for cur TxTreeRegular: %v", err)
-		return err
-	}
-
-	err = utxoView.fetchInputUtxos(b.db, block, parent)
-	if err != nil {
-		return err
-	}
-
-	err = b.checkTransactionsAndConnect(b.subsidyCache, stakeTreeFees, node,
-		block.Transactions(), utxoView, stxos, true)
-	if err != nil {
-		log.Tracef("checkTransactionsAndConnect failed for cur "+
-			"TxTreeRegular: %v", err)
-		return err
-	}
-
-	// Enforce all relative lock times via sequence numbers for the stake
-	// transaction tree once the stake vote for the agenda is active.
-	if lnFeaturesActive {
 		for _, stx := range block.STransactions() {
 			sequenceLock, err := b.calcSequenceLock(node, stx,
-				utxoView, true)
+				view, true)
 			if err != nil {
 				return err
 			}
@@ -2895,8 +3030,98 @@ func (b *BlockChain) checkConnectBlock(node *blockNode, block, parent *dcrutil.B
 	}
 
 	if runScripts {
-		err = checkBlockScripts(block, utxoView, true,
-			scriptFlags, b.sigCache)
+		err = checkBlockScripts(block, view, false, scriptFlags,
+			b.sigCache)
+		if err != nil {
+			log.Tracef("checkBlockScripts failed; error returned "+
+				"on txtreestake of cur block: %v", err)
+			return err
+		}
+	}
+
+	// Ensure the regular transaction tree does not contain any transactions
+	// that 'overwrite' older transactions which are not fully spent.
+	err = b.checkDupTxs(block.Transactions(), view)
+	if err != nil {
+		log.Tracef("checkDupTxs failed for cur TxTreeRegular: %v", err)
+		return err
+	}
+
+	err = b.checkTransactionsAndConnect(stakeTreeFees, node,
+		block.Transactions(), view, stxos, true)
+	if err != nil {
+		log.Tracef("checkTransactionsAndConnect failed for cur "+
+			"TxTreeRegular: %v", err)
+		return err
+	}
+
+	// Enforce all relative lock times via sequence numbers for the regular
+	// transaction tree once the stake vote for the agenda is active.
+	if lnFeaturesActive {
+		// Skip the coinbase since it does not have any inputs and thus
+		// lock times do not apply.
+		for _, tx := range block.Transactions()[1:] {
+			sequenceLock, err := b.calcSequenceLock(node, tx,
+				legacySeqLockView, true)
+			if err != nil {
+				return err
+			}
+			if !SequenceLockActive(sequenceLock, node.height,
+				prevMedianTime) {
+
+				str := fmt.Sprintf("block contains " +
+					"transaction whose input sequence " +
+					"locks are not met")
+				return ruleError(ErrUnfinalizedTx, str)
+			}
+		}
+	}
+
+	// Create a version 2 GCS filter for the block and set the filter into the
+	// caller provided header commitment data when requested.
+	//
+	// This approach is used because the filter creation requires the state of
+	// the utxo set after all transactions in the block have been added to it
+	// since some of the referenced scripts might be outputs of transactions
+	// earlier in the block which will typically not already be available in the
+	// view for the caller until after this function returns.  That means the
+	// caller would have to perform duplicate work that this function already
+	// performs to be able to create the filter.  Since the filter is is needed
+	// at this point to verify the header commitments, a good option is to
+	// simply create it here and allow the caller to request the filter be
+	// retuned to it.
+	filter, err := blockcf2.Regular(block.MsgBlock(), view)
+	if err != nil {
+		return ruleError(ErrMissingTxOut, err.Error())
+	}
+	if hdrCommitments != nil {
+		hdrCommitments.filter = filter
+	}
+
+	// The calculated commitment root must match the associated entry in the
+	// header once the vote for the header commitments agenda is active.
+	//
+	// The header commitments agenda combines the existing stake tree merkle
+	// root header field with the regular merkle root field and repurposes the
+	// stake root field to house the commitment root instead.
+	hdrCommitmentsActive, err := b.isHeaderCommitmentsAgendaActive(node.parent)
+	if err != nil {
+		return err
+	}
+	if hdrCommitmentsActive {
+		wantCommitmentRoot := CalcCommitmentRootV1(filter.Hash())
+		header := &block.MsgBlock().Header
+		if header.StakeRoot != wantCommitmentRoot {
+			str := fmt.Sprintf("block commitment root is invalid - block "+
+				"header indicates %v, but calculated value is %v",
+				header.StakeRoot, wantCommitmentRoot)
+			return ruleError(ErrBadCommitmentRoot, str)
+		}
+	}
+
+	if runScripts {
+		err = checkBlockScripts(block, view, true, scriptFlags,
+			b.sigCache)
 		if err != nil {
 			log.Tracef("checkBlockScripts failed; error returned "+
 				"on txtreeregular of cur block: %v", err)
@@ -2904,21 +3129,9 @@ func (b *BlockChain) checkConnectBlock(node *blockNode, block, parent *dcrutil.B
 		}
 	}
 
-	// Rollback the final tx tree regular so that we don't write it to
-	// database.
-	if node.height > 1 && stxos != nil {
-		idx, err := utxoView.disconnectTransactionSlice(block.Transactions(),
-			node.height, stxos)
-		if err != nil {
-			return err
-		}
-		stxosDeref := *stxos
-		*stxos = stxosDeref[0:idx]
-	}
-
 	// First block has special rules concerning the ledger.
 	if node.height == 1 {
-		err := BlockOneCoinbasePaysTokens(block.Transactions()[0],
+		err := blockOneCoinbasePaysTokens(block.Transactions()[0],
 			b.chainParams)
 		if err != nil {
 			return err
@@ -2927,7 +3140,7 @@ func (b *BlockChain) checkConnectBlock(node *blockNode, block, parent *dcrutil.B
 
 	// Update the best hash for view to include this block since all of its
 	// transactions have been connected.
-	utxoView.SetBestHash(&node.hash)
+	view.SetBestHash(&node.hash)
 
 	return nil
 }
@@ -2974,8 +3187,16 @@ func (b *BlockChain) CheckConnectBlockTemplate(block *dcrutil.Block) error {
 		return err
 	}
 
-	// The block must pass all of the validation rules which depend on the
-	// position of the block within the block chain.
+	// The block must pass all of the validation rules which depend on having
+	// the headers of all ancestors available, but do not rely on having the
+	// full block data of all ancestors available.
+	err = b.checkBlockPositional(block, prevNode, flags)
+	if err != nil {
+		return err
+	}
+
+	// The block must pass all of the validation rules which depend on having
+	// the full block data for all of its ancestors available.
 	err = b.checkBlockContext(block, prevNode, flags)
 	if err != nil {
 		return err
@@ -2995,7 +3216,8 @@ func (b *BlockChain) CheckConnectBlockTemplate(block *dcrutil.Block) error {
 
 		view := NewUtxoViewpoint()
 		view.SetBestHash(&tip.hash)
-		return b.checkConnectBlock(newNode, block, parent, view, nil)
+
+		return b.checkConnectBlock(newNode, block, parent, view, nil, nil)
 	}
 
 	// At this point, the block template must be building on the parent of the
@@ -3004,7 +3226,6 @@ func (b *BlockChain) CheckConnectBlockTemplate(block *dcrutil.Block) error {
 	// block template.
 	view := NewUtxoViewpoint()
 	view.SetBestHash(&tip.hash)
-	view.SetStakeViewpoint(ViewpointPrevValidInitial)
 	tipBlock, err := b.fetchMainChainBlockByNode(tip)
 	if err != nil {
 		return err
@@ -3017,7 +3238,7 @@ func (b *BlockChain) CheckConnectBlockTemplate(block *dcrutil.Block) error {
 	// Load all of the spent txos for the tip block from the spend journal.
 	var stxos []spentTxOut
 	err = b.db.View(func(dbTx database.Tx) error {
-		stxos, err = dbFetchSpendJournalEntry(dbTx, tipBlock, parent)
+		stxos, err = dbFetchSpendJournalEntry(dbTx, tipBlock)
 		return err
 	})
 	if err != nil {
@@ -3025,8 +3246,9 @@ func (b *BlockChain) CheckConnectBlockTemplate(block *dcrutil.Block) error {
 	}
 
 	// Update the view to unspend all of the spent txos and remove the utxos
-	// created by the tip block.
-	err = b.disconnectTransactions(view, tipBlock, parent, stxos)
+	// created by the tip block.  Also, if the block votes against its parent,
+	// reconnect all of the regular transactions.
+	err = view.disconnectBlock(b.db, tipBlock, parent, stxos)
 	if err != nil {
 		return err
 	}
@@ -3034,5 +3256,5 @@ func (b *BlockChain) CheckConnectBlockTemplate(block *dcrutil.Block) error {
 	// The view is now from the point of view of the parent of the current tip
 	// block.  Ensure the block template can be connected without violating any
 	// rules.
-	return b.checkConnectBlock(newNode, block, parent, view, nil)
+	return b.checkConnectBlock(newNode, block, parent, view, nil, nil)
 }

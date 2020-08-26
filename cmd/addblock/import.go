@@ -1,22 +1,23 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"sync"
 	"time"
 
-	"github.com/decred/dcrd/blockchain"
-	"github.com/decred/dcrd/blockchain/indexers"
+	"github.com/decred/dcrd/blockchain/v3"
+	"github.com/decred/dcrd/blockchain/v3/indexers"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/database/v2"
+	"github.com/decred/dcrd/dcrutil/v3"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -108,10 +109,7 @@ func (bi *blockImporter) processBlock(serializedBlock []byte) (bool, error) {
 
 	// Skip blocks that already exist.
 	blockHash := block.Hash()
-	exists, err := bi.chain.HaveBlock(blockHash)
-	if err != nil {
-		return false, err
-	}
+	exists := bi.chain.HaveBlock(blockHash)
 	if exists {
 		return false, nil
 	}
@@ -119,10 +117,7 @@ func (bi *blockImporter) processBlock(serializedBlock []byte) (bool, error) {
 	// Don't bother trying to process orphans.
 	prevHash := &block.MsgBlock().Header.PrevBlock
 	if !prevHash.IsEqual(&zeroHash) {
-		exists, err := bi.chain.HaveBlock(prevHash)
-		if err != nil {
-			return false, err
-		}
+		exists := bi.chain.HaveBlock(prevHash)
 		if !exists {
 			return false, fmt.Errorf("import file contains block "+
 				"%v which does not link to the available "+
@@ -132,19 +127,19 @@ func (bi *blockImporter) processBlock(serializedBlock []byte) (bool, error) {
 
 	// Ensure the blocks follows all of the chain rules and match up to the
 	// known checkpoints.
-	forkLen, isOrphan, err := bi.chain.ProcessBlock(block,
-		blockchain.BFFastAdd)
+	forkLen, err := bi.chain.ProcessBlock(block, blockchain.BFFastAdd)
 	if err != nil {
+		if blockchain.IsErrorCode(err, blockchain.ErrMissingParent) {
+			return false, fmt.Errorf("import file contains an orphan block: %v",
+				blockHash)
+		}
+
 		return false, err
 	}
-	isMainChain := !isOrphan && forkLen == 0
+	isMainChain := forkLen == 0
 	if !isMainChain {
-		return false, fmt.Errorf("import file contains an block that "+
+		return false, fmt.Errorf("import file contains a block that "+
 			"does not extend the main chain: %v", blockHash)
-	}
-	if isOrphan {
-		return false, fmt.Errorf("import file contains an orphan "+
-			"block: %v", blockHash)
 	}
 
 	return true, nil
@@ -336,17 +331,19 @@ func newBlockImporter(db database.DB, r io.ReadSeeker) (*blockImporter, error) {
 	}
 
 	// Create an index manager if any of the optional indexes are enabled.
-	var indexManager blockchain.IndexManager
+	var indexManager indexers.IndexManager
 	if len(indexes) > 0 {
 		indexManager = indexers.NewManager(db, indexes, activeNetParams)
 	}
 
-	chain, err := blockchain.New(&blockchain.Config{
-		DB:           db,
-		ChainParams:  activeNetParams,
-		TimeSource:   blockchain.NewMedianTime(),
-		IndexManager: indexManager,
-	})
+	chain, err := blockchain.New(context.Background(),
+		&blockchain.Config{
+			DB:           db,
+			ChainParams:  activeNetParams,
+			Checkpoints:  activeNetParams.Checkpoints,
+			TimeSource:   blockchain.NewMedianTime(),
+			IndexManager: indexManager,
+		})
 	if err != nil {
 		return nil, err
 	}

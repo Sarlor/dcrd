@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package wire
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"reflect"
 	"testing"
@@ -28,14 +29,21 @@ func TestHeaders(t *testing.T) {
 	}
 
 	// Ensure max payload is expected value for latest protocol version.
-	// Num headers (varInt) + max allowed headers (header length + 1 byte
-	// for the number of transactions which is always 0).
-	wantPayload := uint32(362009)
+	// Num headers (varInt) 3 bytes + max allowed headers (header length +
+	// 1 byte for the number of transactions which is always 0).
+	wantPayload := uint32(362003)
 	maxPayload := msg.MaxPayloadLength(pver)
 	if maxPayload != wantPayload {
 		t.Errorf("MaxPayloadLength: wrong max payload length for "+
 			"protocol version %d - got %v, want %v", pver,
 			maxPayload, wantPayload)
+	}
+
+	// Ensure max payload length is not more than MaxMessagePayload.
+	if maxPayload > MaxMessagePayload {
+		t.Fatalf("MaxPayloadLength: payload length (%v) for protocol "+
+			"version %d exceeds MaxMessagePayload (%v).", maxPayload, pver,
+			MaxMessagePayload)
 	}
 
 	// Ensure headers are added properly.
@@ -53,7 +61,7 @@ func TestHeaders(t *testing.T) {
 	for i := 0; i < MaxBlockHeadersPerMsg+1; i++ {
 		err = msg.AddBlockHeader(bh)
 	}
-	if reflect.TypeOf(err) != reflect.TypeOf(&MessageError{}) {
+	if !errors.Is(err, ErrTooManyHeaders) {
 		t.Errorf("AddBlockHeader: expected error on too many headers " +
 			"not received")
 	}
@@ -79,7 +87,7 @@ func TestHeadersWire(t *testing.T) {
 		uint32(0),                                   // Size
 		uint32(0x01010101),                          // Nonce
 		[32]byte{},                                  // ExtraData
-		uint32(0xba5eba11),                          //StakeVersion
+		uint32(0xba5eba11),                          // StakeVersion
 	)
 	bh.Timestamp = time.Unix(0x4966bc61, 0)
 
@@ -185,14 +193,13 @@ func TestHeadersWire(t *testing.T) {
 // of MsgHeaders to confirm error paths work correctly.
 func TestHeadersWireErrors(t *testing.T) {
 	pver := ProtocolVersion
-	wireErr := &MessageError{}
 
 	hash := mainNetGenesisHash
 	merkleHash := testBlock.Header.MerkleRoot
 	bits := uint32(0x1d00ffff)
 	nonce := uint32(0x9962e301)
 	bh := NewBlockHeader(
-		int32(pver),    // Verision
+		int32(pver),    // Version
 		&hash,          // PrevHash
 		&merkleHash,    // MerkleRootHash
 		&merkleHash,    // StakeRoot
@@ -208,7 +215,7 @@ func TestHeadersWireErrors(t *testing.T) {
 		uint32(0),                 // Size
 		nonce,                     // Nonce
 		[32]byte{},                // ExtraData
-		uint32(0xca55e77e),        //StakeVersion
+		uint32(0xca55e77e),        // StakeVersion
 	)
 
 	bh.Version = testBlock.Header.Version
@@ -264,7 +271,7 @@ func TestHeadersWireErrors(t *testing.T) {
 	// Intentionally invalid block header that has a transaction count used
 	// to force errors.
 	bhTrans := NewBlockHeader(
-		int32(0),       // Verision
+		int32(0),       // Version
 		&hash,          // PrevHash
 		&merkleHash,    // MerkleRootHash
 		&merkleHash,    // StakeRoot
@@ -334,7 +341,7 @@ func TestHeadersWireErrors(t *testing.T) {
 		// Force error in block header.
 		{oneHeader, oneHeaderEncoded, pver, 5, io.ErrShortWrite, io.EOF},
 		// Force error with greater than max headers.
-		{maxHeaders, maxHeadersEncoded, pver, 3, wireErr, wireErr},
+		{maxHeaders, maxHeadersEncoded, pver, 3, ErrTooManyHeaders, ErrTooManyHeaders},
 		// Force error with number of transactions.
 		{transHeader, transHeaderEncoded, pver, 181, io.ErrShortWrite, io.EOF},
 		// Force error with included transactions.
@@ -346,42 +353,21 @@ func TestHeadersWireErrors(t *testing.T) {
 		// Encode to wire format.
 		w := newFixedWriter(test.max)
 		err := test.in.BtcEncode(w, test.pver)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.writeErr) {
-			t.Errorf("BtcEncode #%d wrong error got: %v, want: %v",
-				i, err, test.writeErr)
+		if !errors.Is(err, test.writeErr) {
+			t.Errorf("BtcEncode #%d wrong error got: %v, want: %v", i, err,
+				test.writeErr)
 			continue
-		}
-
-		// For errors which are not of type MessageError, check them for
-		// equality.
-		if _, ok := err.(*MessageError); !ok {
-			if err != test.writeErr {
-				t.Errorf("BtcEncode #%d wrong error got: %v, "+
-					"want: %v", i, err, test.writeErr)
-				continue
-			}
 		}
 
 		// Decode from wire format.
 		var msg MsgHeaders
 		r := newFixedReader(test.max, test.buf)
 		err = msg.BtcDecode(r, test.pver)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.readErr) {
+		if !errors.Is(err, test.readErr) {
 			spew.Dump(test)
-			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
-				i, err, test.readErr)
+			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v", i, err,
+				test.readErr)
 			continue
 		}
-
-		// For errors which are not of type MessageError, check them for
-		// equality.
-		if _, ok := err.(*MessageError); !ok {
-			if err != test.readErr {
-				t.Errorf("BtcDecode #%d wrong error got: %v, "+
-					"want: %v", i, err, test.readErr)
-				continue
-			}
-		}
-
 	}
 }

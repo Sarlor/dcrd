@@ -1,23 +1,23 @@
-module github.com/decred/dcrd/database
+module github.com/decred/dcrd/database/v2
+
+go 1.11
 
 require (
-	github.com/btcsuite/goleveldb v1.0.0
-	github.com/decred/dcrd/chaincfg v1.1.1
-	github.com/decred/dcrd/chaincfg/chainhash v1.0.1
-	github.com/decred/dcrd/dcrutil v1.1.1
-	github.com/decred/dcrd/wire v1.1.0
+	github.com/decred/dcrd/chaincfg/chainhash v1.0.2
+	github.com/decred/dcrd/chaincfg/v3 v3.0.0-20200215031403-6b2ce76f0986
+	github.com/decred/dcrd/dcrutil/v3 v3.0.0-20200215031403-6b2ce76f0986
+	github.com/decred/dcrd/wire v1.3.0
 	github.com/decred/slog v1.0.0
+	github.com/golang/protobuf v1.3.2 // indirect
 	github.com/jessevdk/go-flags v1.4.0
-	golang.org/x/net v0.0.0-20180808004115-f9ce57c11b24 // indirect
-	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127 // indirect
+	github.com/onsi/ginkgo v1.11.0 // indirect
+	github.com/onsi/gomega v1.8.1 // indirect
+	github.com/syndtr/goleveldb v1.0.1-0.20190923125748-758128399b1d
+	golang.org/x/sys v0.0.0-20191010194322-b09406accb47 // indirect
 )
 
 replace (
-	github.com/decred/dcrd/chaincfg => ../chaincfg
-	github.com/decred/dcrd/chaincfg/chainhash => ../chaincfg/chainhash
-	github.com/decred/dcrd/dcrec => ../dcrec
-	github.com/decred/dcrd/dcrec/edwards => ../dcrec/edwards
-	github.com/decred/dcrd/dcrec/secp256k1 => ../dcrec/secp256k1
-	github.com/decred/dcrd/dcrutil => ../dcrutil
-	github.com/decred/dcrd/wire => ../wire
+	github.com/decred/dcrd/chaincfg/v3 => ../chaincfg
+	github.com/decred/dcrd/dcrec/secp256k1/v3 => ../dcrec/secp256k1
+	github.com/decred/dcrd/dcrutil/v3 => ../dcrutil
 )

@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"compress/bzip2"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -15,12 +16,12 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/decred/dcrd/blockchain/stake/internal/tickettreap"
-	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/blockchain/stake/v3/internal/tickettreap"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
-	_ "github.com/decred/dcrd/database/ffldb"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/database/v2"
+	_ "github.com/decred/dcrd/database/v2/ffldb"
+	"github.com/decred/dcrd/dcrutil/v3"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -38,6 +39,49 @@ func calcHash256PRNGIVFromHeader(header *wire.BlockHeader) (chainhash.Hash, erro
 		return chainhash.Hash{}, err
 	}
 	return CalcHash256PRNGIV(hB), nil
+}
+
+// mockStakeParams implements the StakeParams interface and is used throughout
+// the tests to mock networks.
+type mockStakeParams chaincfg.Params
+
+// VotesPerBlock returns the value associated with the mock params for the
+// maximum number of votes a block must contain to receive full subsidy
+//
+// This is part of the StakeParams interface.
+func (s *mockStakeParams) VotesPerBlock() uint16 {
+	return s.TicketsPerBlock
+}
+
+// StakeValidationBeginHeight returns the value associated with the mock params
+// for the height at which votes become required to extend a block.
+//
+// This is part of the StakeParams interface.
+func (s *mockStakeParams) StakeValidationBeginHeight() int64 {
+	return s.StakeValidationHeight
+}
+
+// StakeEnableHeight returns the value associated with the mock params for the
+// height at which the first ticket could possibly mature.
+//
+// This is part of the StakeParams interface.
+func (s *mockStakeParams) StakeEnableHeight() int64 {
+	return s.StakeEnabledHeight
+}
+
+// TicketExpiryBlocks returns the value associated with the mock params for the
+// number of blocks after maturity that tickets expire.
+//
+// This is part of the StakeParams interface.
+func (s *mockStakeParams) TicketExpiryBlocks() uint32 {
+	return s.TicketExpiry
+}
+
+// mockRegNetParams returns mock regression test stake parameters to use
+// throughout the tests.  They match the Decred regression test network params
+// as of the time this comment was written.
+func mockRegNetParams() *mockStakeParams {
+	return (*mockStakeParams)(chaincfg.RegNetParams())
 }
 
 // copyNode copies a stake node so that it can be manipulated for tests.
@@ -60,9 +104,9 @@ func copyNode(n *Node) *Node {
 	databaseUndoUpdate := make(UndoTicketDataSlice, len(n.databaseUndoUpdate))
 	copy(databaseUndoUpdate[:], n.databaseUndoUpdate[:])
 	databaseBlockTickets := make([]chainhash.Hash, len(n.databaseBlockTickets))
-	copy(databaseBlockTickets[:], n.databaseBlockTickets[:])
+	copy(databaseBlockTickets, n.databaseBlockTickets[:])
 	nextWinners := make([]chainhash.Hash, len(n.nextWinners))
-	copy(nextWinners[:], n.nextWinners[:])
+	copy(nextWinners, n.nextWinners)
 	var finalState [6]byte
 	copy(finalState[:], n.finalState[:])
 
@@ -208,12 +252,12 @@ func nodesEqual(a *Node, b *Node) error {
 
 func TestTicketDBLongChain(t *testing.T) {
 	// Declare some useful variables.
-	params := &chaincfg.RegNetParams
+	params := mockRegNetParams()
 	testBCHeight := int64(1001)
 	filename := filepath.Join("testdata", "testexpiry.bz2")
 	fi, err := os.Open(filename)
 	if err != nil {
-		t.Fatalf("failed ot open test data: %v", err)
+		t.Fatalf("failed to open test data: %v", err)
 	}
 	bcStream := bzip2.NewReader(fi)
 	defer fi.Close()
@@ -417,7 +461,7 @@ func TestTicketDBLongChain(t *testing.T) {
 		// Load the genesis block and begin testing exported functions.
 		err = testDb.Update(func(dbTx database.Tx) error {
 			var errLocal error
-			bestNode, errLocal = InitDatabaseState(dbTx, params)
+			bestNode, errLocal = InitDatabaseState(dbTx, params, &params.GenesisHash)
 			if errLocal != nil {
 				return errLocal
 			}
@@ -588,7 +632,7 @@ func TestTicketDBLongChain(t *testing.T) {
 
 func TestTicketDBGeneral(t *testing.T) {
 	// Declare some useful variables.
-	params := &chaincfg.RegNetParams
+	params := mockRegNetParams()
 	testBCHeight := int64(168)
 	filename := filepath.Join("testdata", "blocks0to168.bz2")
 	fi, err := os.Open(filename)
@@ -637,7 +681,7 @@ func TestTicketDBGeneral(t *testing.T) {
 	var bestNode *Node
 	err = testDb.Update(func(dbTx database.Tx) error {
 		var errLocal error
-		bestNode, errLocal = InitDatabaseState(dbTx, params)
+		bestNode, errLocal = InitDatabaseState(dbTx, params, &params.GenesisHash)
 		return errLocal
 	})
 	if err != nil {
@@ -840,9 +884,10 @@ func TestTicketDBGeneral(t *testing.T) {
 	// Best node missing ticket in live ticket bucket to spend.
 	n161Copy := copyNode(nodesForward[161])
 	n161Copy.liveTickets.Delete(tickettreap.Key(n162Test.SpentByBlock()[0]))
+	var rerr RuleError
 	_, err = n161Copy.ConnectNode(b162LotteryIV, n162Test.SpentByBlock(),
 		revokedTicketsInBlock(b162), n162Test.NewTickets())
-	if err == nil || err.(RuleError).GetCode() != ErrMissingTicket {
+	if !errors.As(err, &rerr) || rerr.GetCode() != ErrMissingTicket {
 		t.Errorf("unexpected wrong or no error for "+
 			"Best node missing ticket in live ticket bucket to spend: %v", err)
 	}
@@ -855,7 +900,7 @@ func TestTicketDBGeneral(t *testing.T) {
 	spentInBlock[0] = spentInBlock[1]
 	_, err = n161Copy.ConnectNode(b162LotteryIV, spentInBlock,
 		revokedTicketsInBlock(b162), n162Test.NewTickets())
-	if err == nil || err.(RuleError).GetCode() != ErrMissingTicket {
+	if !errors.As(err, &rerr) || rerr.GetCode() != ErrMissingTicket {
 		t.Errorf("unexpected wrong or no error for "+
 			"Best node missing ticket in live ticket bucket to spend: %v", err)
 	}
@@ -866,7 +911,7 @@ func TestTicketDBGeneral(t *testing.T) {
 	spentInBlock[4] = someHash
 	_, err = nodesForward[161].ConnectNode(b162LotteryIV, spentInBlock,
 		revokedTicketsInBlock(b162), n162Test.NewTickets())
-	if err == nil || err.(RuleError).GetCode() != ErrUnknownTicketSpent {
+	if !errors.As(err, &rerr) || rerr.GetCode() != ErrUnknownTicketSpent {
 		t.Errorf("unexpected wrong or no error for "+
 			"Test for corrupted spentInBlock: %v", err)
 	}
@@ -876,7 +921,7 @@ func TestTicketDBGeneral(t *testing.T) {
 	n161Copy.nextWinners[4] = someHash
 	_, err = n161Copy.ConnectNode(b162LotteryIV, spentInBlock,
 		revokedTicketsInBlock(b162), n162Test.NewTickets())
-	if err == nil || err.(RuleError).GetCode() != ErrMissingTicket {
+	if !errors.As(err, &rerr) || rerr.GetCode() != ErrMissingTicket {
 		t.Errorf("unexpected wrong or no error for "+
 			"Corrupt winners: %v", err)
 	}
@@ -886,7 +931,7 @@ func TestTicketDBGeneral(t *testing.T) {
 	spentInBlock = n162Copy.SpentByBlock()
 	_, err = nodesForward[161].ConnectNode(b162LotteryIV, spentInBlock,
 		append(revokedTicketsInBlock(b162), someHash), n162Copy.NewTickets())
-	if err == nil || err.(RuleError).GetCode() != ErrMissingTicket {
+	if !errors.As(err, &rerr) || rerr.GetCode() != ErrMissingTicket {
 		t.Errorf("unexpected wrong or no error for "+
 			"Unknown missed ticket: %v", err)
 	}
@@ -896,7 +941,7 @@ func TestTicketDBGeneral(t *testing.T) {
 	newTicketsDup := []chainhash.Hash{someHash, someHash}
 	_, err = nodesForward[161].ConnectNode(b162LotteryIV, spentInBlock,
 		revokedTicketsInBlock(b162), newTicketsDup)
-	if err == nil || err.(RuleError).GetCode() != ErrDuplicateTicket {
+	if !errors.As(err, &rerr) || rerr.GetCode() != ErrDuplicateTicket {
 		t.Errorf("unexpected wrong or no error for "+
 			"Insert a duplicate new ticket: %v", err)
 	}
@@ -937,7 +982,7 @@ func TestTicketDBGeneral(t *testing.T) {
 	n162Copy.databaseUndoUpdate[0].Revoked = false
 	_, err = n162Copy.DisconnectNode(b161LotteryIV, n161Copy.UndoData(),
 		n161Copy.NewTickets(), nil)
-	if err == nil || err.(RuleError).GetCode() != ErrMissingTicket {
+	if !errors.As(err, &rerr) || rerr.GetCode() != ErrMissingTicket {
 		t.Errorf("unexpected wrong or no error for "+
 			"Unknown undo data for disconnecting (missing): %v", err)
 	}
@@ -952,7 +997,7 @@ func TestTicketDBGeneral(t *testing.T) {
 	n162Copy.databaseUndoUpdate[0].Revoked = true
 	_, err = n162Copy.DisconnectNode(b161LotteryIV, n161Copy.UndoData(),
 		n161Copy.NewTickets(), nil)
-	if err == nil || err.(RuleError).GetCode() != ErrMissingTicket {
+	if !errors.As(err, &rerr) || rerr.GetCode() != ErrMissingTicket {
 		t.Errorf("unexpected wrong or no error for "+
 			"Unknown undo data for disconnecting (revoked): %v", err)
 	}

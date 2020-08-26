@@ -1,11 +1,12 @@
 // Copyright (c) 2014-2016 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package rpcclient
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,8 +14,8 @@ import (
 	"strconv"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/dcrjson"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/dcrutil/v3"
+	chainjson "github.com/decred/dcrd/rpc/jsonrpc/types/v2"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -28,10 +29,11 @@ var (
 )
 
 // notificationState is used to track the current state of successfully
-// registered notification so the state can be automatically re-established on
+// registered notifications so the state can be automatically re-established on
 // reconnect.
 type notificationState struct {
 	notifyBlocks                bool
+	notifyWork                  bool
 	notifyWinningTickets        bool
 	notifySpentAndMissedTickets bool
 	notifyNewTickets            bool
@@ -44,6 +46,7 @@ type notificationState struct {
 func (s *notificationState) Copy() *notificationState {
 	var stateCopy notificationState
 	stateCopy.notifyBlocks = s.notifyBlocks
+	stateCopy.notifyWork = s.notifyWork
 	stateCopy.notifyWinningTickets = s.notifyWinningTickets
 	stateCopy.notifySpentAndMissedTickets = s.notifySpentAndMissedTickets
 	stateCopy.notifyNewTickets = s.notifyNewTickets
@@ -59,14 +62,14 @@ func newNotificationState() *notificationState {
 	return &notificationState{}
 }
 
-// newNilFutureResult returns a new future result channel that already has the
-// result waiting on the channel with the reply set to nil.  This is useful
-// to ignore things such as notifications when the caller didn't specify any
-// notification handlers.
-func newNilFutureResult() chan *response {
+// newNilFutureResult returns a new future result that already has the result
+// waiting on the channel with the reply set to nil.  This is useful to ignore
+// things such as notifications when the caller didn't specify any notification
+// handlers.
+func newNilFutureResult(ctx context.Context) *cmdRes {
 	responseChan := make(chan *response, 1)
 	responseChan <- &response{result: nil, err: nil}
-	return responseChan
+	return &cmdRes{ctx: ctx, c: responseChan}
 }
 
 // NotificationHandlers defines callback function pointers to invoke with
@@ -95,6 +98,11 @@ type NotificationHandlers struct {
 	// NotifyBlocks has been made to register for the notification and the
 	// function is non-nil.
 	OnBlockDisconnected func(blockHeader []byte)
+
+	// OnWork is invoked when a new block template is generated.
+	// It will only be invoked if a preceding call to NotifyWork has
+	// been made to register for the notification and the function is non-nil.
+	OnWork func(data []byte, target []byte, reason string)
 
 	// OnRelevantTxAccepted is invoked when an unmined transaction passes
 	// the client's transaction filter.
@@ -150,49 +158,7 @@ type NotificationHandlers struct {
 	// memory pool.  It will only be invoked if a preceding call to
 	// NotifyNewTransactions with the verbose flag set to true has been
 	// made to register for the notification and the function is non-nil.
-	OnTxAcceptedVerbose func(txDetails *dcrjson.TxRawResult)
-
-	// OnDcrdConnected is invoked when a wallet connects or disconnects from
-	// dcrd.
-	//
-	// This will only be available when client is connected to a wallet
-	// server such as dcrwallet.
-	OnDcrdConnected func(connected bool)
-
-	// OnAccountBalance is invoked with account balance updates.
-	//
-	// This will only be available when speaking to a wallet server
-	// such as dcrwallet.
-	OnAccountBalance func(account string, balance dcrutil.Amount, confirmed bool)
-
-	// OnWalletLockState is invoked when a wallet is locked or unlocked.
-	//
-	// This will only be available when client is connected to a wallet
-	// server such as dcrwallet.
-	OnWalletLockState func(locked bool)
-
-	// OnTicketsPurchased is invoked when a wallet purchases an SStx.
-	//
-	// This will only be available when client is connected to a wallet
-	// server such as dcrwallet.
-	OnTicketsPurchased func(TxHash *chainhash.Hash, amount dcrutil.Amount)
-
-	// OnVotesCreated is invoked when a wallet generates an SSGen.
-	//
-	// This will only be available when client is connected to a wallet
-	// server such as dcrwallet.
-	OnVotesCreated func(txHash *chainhash.Hash,
-		blockHash *chainhash.Hash,
-		height int32,
-		sstxIn *chainhash.Hash,
-		voteBits uint16)
-
-	// OnRevocationsCreated is invoked when a wallet generates an SSRtx.
-	//
-	// This will only be available when client is connected to a wallet
-	// server such as dcrwallet.
-	OnRevocationsCreated func(txHash *chainhash.Hash,
-		sstxIn *chainhash.Hash)
+	OnTxAcceptedVerbose func(txDetails *chainjson.TxRawResult)
 
 	// OnUnknownNotification is invoked when an unrecognized notification
 	// is received.  This typically means the notification handling code
@@ -213,9 +179,10 @@ func (c *Client) handleNotification(ntfn *rawNotification) {
 		return
 	}
 
-	switch ntfn.Method {
+	// Handle chain notifications.
+	switch chainjson.Method(ntfn.Method) {
 	// OnBlockConnected
-	case dcrjson.BlockConnectedNtfnMethod:
+	case chainjson.BlockConnectedNtfnMethod:
 		// Ignore the notification if the client is not interested in
 		// it.
 		if c.ntfnHandlers.OnBlockConnected == nil {
@@ -232,7 +199,7 @@ func (c *Client) handleNotification(ntfn *rawNotification) {
 		c.ntfnHandlers.OnBlockConnected(blockHeader, transactions)
 
 	// OnBlockDisconnected
-	case dcrjson.BlockDisconnectedNtfnMethod:
+	case chainjson.BlockDisconnectedNtfnMethod:
 		// Ignore the notification if the client is not interested in
 		// it.
 		if c.ntfnHandlers.OnBlockDisconnected == nil {
@@ -248,7 +215,23 @@ func (c *Client) handleNotification(ntfn *rawNotification) {
 
 		c.ntfnHandlers.OnBlockDisconnected(blockHeader)
 
-	case dcrjson.RelevantTxAcceptedNtfnMethod:
+	// OnWork
+	case chainjson.WorkNtfnMethod:
+		// Ignore the notification if the client is not interested in
+		// it.
+		if c.ntfnHandlers.OnWork == nil {
+			return
+		}
+
+		data, target, reason, err := parseWorkParams(ntfn.Params)
+		if err != nil {
+			log.Warnf("Received invalid work notification: %v", err)
+			return
+		}
+
+		c.ntfnHandlers.OnWork(data, target, reason)
+
+	case chainjson.RelevantTxAcceptedNtfnMethod:
 		// Ignore the notification if the client is not interested in
 		// it.
 		if c.ntfnHandlers.OnRelevantTxAccepted == nil {
@@ -264,7 +247,8 @@ func (c *Client) handleNotification(ntfn *rawNotification) {
 
 		c.ntfnHandlers.OnRelevantTxAccepted(transaction)
 
-	case dcrjson.ReorganizationNtfnMethod:
+	// OnReorganization
+	case chainjson.ReorganizationNtfnMethod:
 		// Ignore the notification if the client is not interested in
 		// it.
 		if c.ntfnHandlers.OnReorganization == nil {
@@ -282,7 +266,7 @@ func (c *Client) handleNotification(ntfn *rawNotification) {
 		c.ntfnHandlers.OnReorganization(oldHash, oldHeight, newHash, newHeight)
 
 	// OnWinningTickets
-	case dcrjson.WinningTicketsNtfnMethod:
+	case chainjson.WinningTicketsNtfnMethod:
 		// Ignore the notification if the client is not interested in
 		// it.
 		if c.ntfnHandlers.OnWinningTickets == nil {
@@ -297,12 +281,10 @@ func (c *Client) handleNotification(ntfn *rawNotification) {
 			return
 		}
 
-		c.ntfnHandlers.OnWinningTickets(blockHash,
-			blockHeight,
-			tickets)
+		c.ntfnHandlers.OnWinningTickets(blockHash, blockHeight, tickets)
 
 	// OnSpentAndMissedTickets
-	case dcrjson.SpentAndMissedTicketsNtfnMethod:
+	case chainjson.SpentAndMissedTicketsNtfnMethod:
 		// Ignore the notification if the client is not interested in
 		// it.
 		if c.ntfnHandlers.OnSpentAndMissedTickets == nil {
@@ -323,7 +305,7 @@ func (c *Client) handleNotification(ntfn *rawNotification) {
 			tickets)
 
 	// OnNewTickets
-	case dcrjson.NewTicketsNtfnMethod:
+	case chainjson.NewTicketsNtfnMethod:
 		// Ignore the notification if the client is not interested in
 		// it.
 		if c.ntfnHandlers.OnNewTickets == nil {
@@ -344,7 +326,7 @@ func (c *Client) handleNotification(ntfn *rawNotification) {
 			tickets)
 
 	// OnStakeDifficulty
-	case dcrjson.StakeDifficultyNtfnMethod:
+	case chainjson.StakeDifficultyNtfnMethod:
 		// Ignore the notification if the client is not interested in
 		// it.
 		if c.ntfnHandlers.OnStakeDifficulty == nil {
@@ -364,7 +346,7 @@ func (c *Client) handleNotification(ntfn *rawNotification) {
 			stakeDiff)
 
 	// OnTxAccepted
-	case dcrjson.TxAcceptedNtfnMethod:
+	case chainjson.TxAcceptedNtfnMethod:
 		// Ignore the notification if the client is not interested in
 		// it.
 		if c.ntfnHandlers.OnTxAccepted == nil {
@@ -381,7 +363,7 @@ func (c *Client) handleNotification(ntfn *rawNotification) {
 		c.ntfnHandlers.OnTxAccepted(hash, amt)
 
 	// OnTxAcceptedVerbose
-	case dcrjson.TxAcceptedVerboseNtfnMethod:
+	case chainjson.TxAcceptedVerboseNtfnMethod:
 		// Ignore the notification if the client is not interested in
 		// it.
 		if c.ntfnHandlers.OnTxAcceptedVerbose == nil {
@@ -397,114 +379,9 @@ func (c *Client) handleNotification(ntfn *rawNotification) {
 
 		c.ntfnHandlers.OnTxAcceptedVerbose(rawTx)
 
-		// OnDcrdConnected
-	case dcrjson.DcrdConnectedNtfnMethod:
-		// Ignore the notification if the client is not interested in
-		// it.
-		if c.ntfnHandlers.OnDcrdConnected == nil {
-			return
-		}
-
-		connected, err := parseDcrdConnectedNtfnParams(ntfn.Params)
-		if err != nil {
-			log.Warnf("Received invalid dcrd connected "+
-				"notification: %v", err)
-			return
-		}
-
-		c.ntfnHandlers.OnDcrdConnected(connected)
-
-	// OnAccountBalance
-	case dcrjson.AccountBalanceNtfnMethod:
-		// Ignore the notification if the client is not interested in
-		// it.
-		if c.ntfnHandlers.OnAccountBalance == nil {
-			return
-		}
-
-		account, bal, conf, err := parseAccountBalanceNtfnParams(ntfn.Params)
-		if err != nil {
-			log.Warnf("Received invalid account balance "+
-				"notification: %v", err)
-			return
-		}
-
-		c.ntfnHandlers.OnAccountBalance(account, bal, conf)
-
-	// OnTicketPurchased:
-	case dcrjson.TicketPurchasedNtfnMethod:
-		// Ignore the notification if the client is not interested in
-		// it.
-		if c.ntfnHandlers.OnTicketsPurchased == nil {
-			return
-		}
-
-		txHash, amount, err := parseTicketPurchasedNtfnParams(ntfn.Params)
-		if err != nil {
-			log.Warnf("Received invalid ticket purchased "+
-				"notification: %v", err)
-			return
-		}
-
-		c.ntfnHandlers.OnTicketsPurchased(txHash, amount)
-
-	// OnVotesCreated:
-	case dcrjson.VoteCreatedNtfnMethod:
-		// Ignore the notification if the client is not interested in
-		// it.
-		if c.ntfnHandlers.OnVotesCreated == nil {
-			return
-		}
-
-		txHash, blockHash, height, sstxIn, voteBits, err :=
-			parseVoteCreatedNtfnParams(ntfn.Params)
-		if err != nil {
-			log.Warnf("Received invalid vote created "+
-				"notification: %v", err)
-			return
-		}
-
-		c.ntfnHandlers.OnVotesCreated(txHash, blockHash, height, sstxIn, voteBits)
-
-	// OnRevocationsCreated:
-	case dcrjson.RevocationCreatedNtfnMethod:
-		// Ignore the notification if the client is not interested in
-		// it.
-		if c.ntfnHandlers.OnRevocationsCreated == nil {
-			return
-		}
-
-		txHash, sstxIn, err := parseRevocationCreatedNtfnParams(ntfn.Params)
-		if err != nil {
-			log.Warnf("Received invalid revocation created "+
-				"notification: %v", err)
-			return
-		}
-
-		c.ntfnHandlers.OnRevocationsCreated(txHash, sstxIn)
-
-	// OnWalletLockState
-	case dcrjson.WalletLockStateNtfnMethod:
-		// Ignore the notification if the client is not interested in
-		// it.
-		if c.ntfnHandlers.OnWalletLockState == nil {
-			return
-		}
-
-		// The account name is not notified, so the return value is
-		// discarded.
-		_, locked, err := parseWalletLockStateNtfnParams(ntfn.Params)
-		if err != nil {
-			log.Warnf("Received invalid wallet lock state "+
-				"notification: %v", err)
-			return
-		}
-
-		c.ntfnHandlers.OnWalletLockState(locked)
-
-	// OnUnknownNotification
 	default:
 		if c.ntfnHandlers.OnUnknownNotification == nil {
+			log.Tracef("unknown notification received")
 			return
 		}
 
@@ -513,12 +390,12 @@ func (c *Client) handleNotification(ntfn *rawNotification) {
 }
 
 // wrongNumParams is an error type describing an unparseable JSON-RPC
-// notificiation due to an incorrect number of parameters for the
+// notification due to an incorrect number of parameters for the
 // expected notification type.  The value is the number of parameters
 // of the invalid notification.
 type wrongNumParams int
 
-// Error satisifies the builtin error interface.
+// Error satisfies the builtin error interface.
 func (e wrongNumParams) Error() string {
 	return fmt.Sprintf("wrong number of parameters (%d)", e)
 }
@@ -558,6 +435,31 @@ func parseBlockConnectedParams(params []json.RawMessage) (blockHeader []byte, tr
 	}
 
 	return blockHeader, transactions, nil
+}
+
+// parseWorkParams parses out the parameters included in a
+// newwork notification.
+func parseWorkParams(params []json.RawMessage) (data, target []byte, reason string, err error) {
+	if len(params) != 3 {
+		return nil, nil, "", wrongNumParams(len(params))
+	}
+
+	data, err = parseHexParam(params[0])
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	target, err = parseHexParam(params[1])
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	err = json.Unmarshal(params[2], &reason)
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	return data, target, reason, nil
 }
 
 // parseBlockDisconnectedParams parses out the parameters included in a
@@ -899,7 +801,7 @@ func parseTxAcceptedNtfnParams(params []json.RawMessage) (*chainhash.Hash,
 
 // parseTxAcceptedVerboseNtfnParams parses out details about a raw transaction
 // from the parameters of a txacceptedverbose notification.
-func parseTxAcceptedVerboseNtfnParams(params []json.RawMessage) (*dcrjson.TxRawResult,
+func parseTxAcceptedVerboseNtfnParams(params []json.RawMessage) (*chainjson.TxRawResult,
 	error) {
 
 	if len(params) != 1 {
@@ -907,7 +809,7 @@ func parseTxAcceptedVerboseNtfnParams(params []json.RawMessage) (*dcrjson.TxRawR
 	}
 
 	// Unmarshal first parameter as a raw transaction result object.
-	var rawTx dcrjson.TxRawResult
+	var rawTx chainjson.TxRawResult
 	err := json.Unmarshal(params[0], &rawTx)
 	if err != nil {
 		return nil, err
@@ -919,221 +821,25 @@ func parseTxAcceptedVerboseNtfnParams(params []json.RawMessage) (*dcrjson.TxRawR
 	return &rawTx, nil
 }
 
-// parseDcrdConnectedNtfnParams parses out the connection status of dcrd
-// and dcrwallet from the parameters of a dcrdconnected notification.
-func parseDcrdConnectedNtfnParams(params []json.RawMessage) (bool, error) {
-	if len(params) != 1 {
-		return false, wrongNumParams(len(params))
-	}
-
-	// Unmarshal first parameter as a boolean.
-	var connected bool
-	err := json.Unmarshal(params[0], &connected)
-	if err != nil {
-		return false, err
-	}
-
-	return connected, nil
-}
-
-// parseAccountBalanceNtfnParams parses out the account name, total balance,
-// and whether or not the balance is confirmed or unconfirmed from the
-// parameters of an accountbalance notification.
-func parseAccountBalanceNtfnParams(params []json.RawMessage) (account string,
-	balance dcrutil.Amount, confirmed bool, err error) {
-
-	if len(params) != 3 {
-		return "", 0, false, wrongNumParams(len(params))
-	}
-
-	// Unmarshal first parameter as a string.
-	err = json.Unmarshal(params[0], &account)
-	if err != nil {
-		return "", 0, false, err
-	}
-
-	// Unmarshal second parameter as a floating point number.
-	var fbal float64
-	err = json.Unmarshal(params[1], &fbal)
-	if err != nil {
-		return "", 0, false, err
-	}
-
-	// Unmarshal third parameter as a boolean.
-	err = json.Unmarshal(params[2], &confirmed)
-	if err != nil {
-		return "", 0, false, err
-	}
-
-	// Bounds check amount.
-	bal, err := dcrutil.NewAmount(fbal)
-	if err != nil {
-		return "", 0, false, err
-	}
-
-	return account, bal, confirmed, nil
-}
-
-// parseTicketPurchasedNtfnParams parses out the ticket hash and amount
-// from a recent ticket purchase in the wallet.
-func parseTicketPurchasedNtfnParams(params []json.RawMessage) (txHash *chainhash.Hash,
-	amount dcrutil.Amount, err error) {
-
-	if len(params) != 2 {
-		return nil, 0, wrongNumParams(len(params))
-	}
-
-	// Unmarshal first parameter as a string and convert to hash.
-	var th string
-	err = json.Unmarshal(params[0], &th)
-	if err != nil {
-		return nil, 0, err
-	}
-	thHash, err := chainhash.NewHashFromStr(th)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	// Unmarshal second parameter as an int64.
-	var amt int64
-	err = json.Unmarshal(params[1], &amt)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return thHash, dcrutil.Amount(amt), nil
-}
-
-// parseVoteCreatedNtfnParams parses out the hash, block hash, block height,
-// ticket input hash, and votebits from a newly created SSGen in wallet.
-// from a recent ticket purchase in the wallet.
-func parseVoteCreatedNtfnParams(params []json.RawMessage) (txHash *chainhash.Hash,
-	blockHash *chainhash.Hash,
-	height int32,
-	sstxIn *chainhash.Hash,
-	voteBits uint16,
-	err error) {
-
-	if len(params) != 5 {
-		return nil, nil, 0, nil, 0, wrongNumParams(len(params))
-	}
-
-	// Unmarshal first parameter as a string and convert to hash.
-	var th string
-	err = json.Unmarshal(params[0], &th)
-	if err != nil {
-		return nil, nil, 0, nil, 0, err
-	}
-	thHash, err := chainhash.NewHashFromStr(th)
-	if err != nil {
-		return nil, nil, 0, nil, 0, err
-	}
-
-	// Unmarshal second parameter as a string and convert to hash.
-	var bh string
-	err = json.Unmarshal(params[1], &bh)
-	if err != nil {
-		return nil, nil, 0, nil, 0, err
-	}
-	bhHash, err := chainhash.NewHashFromStr(bh)
-	if err != nil {
-		return nil, nil, 0, nil, 0, err
-	}
-
-	// Unmarshal third parameter as an int32.
-	var h int32
-	err = json.Unmarshal(params[2], &h)
-	if err != nil {
-		return nil, nil, 0, nil, 0, err
-	}
-
-	// Unmarshal fourth parameter as a string and convert to hash.
-	var ss string
-	err = json.Unmarshal(params[3], &ss)
-	if err != nil {
-		return nil, nil, 0, nil, 0, err
-	}
-	ssHash, err := chainhash.NewHashFromStr(ss)
-	if err != nil {
-		return nil, nil, 0, nil, 0, err
-	}
-
-	// Unmarshal fifth parameter as a uint16.
-	var vb uint16
-	err = json.Unmarshal(params[4], &vb)
-	if err != nil {
-		return nil, nil, 0, nil, 0, err
-	}
-
-	return thHash, bhHash, h, ssHash, vb, nil
-}
-
-// parseRevocationCreatedNtfnParams parses out the hash and ticket input hash
-// from a newly created SSGen in wallet.
-func parseRevocationCreatedNtfnParams(params []json.RawMessage) (txHash *chainhash.Hash,
-	sstxIn *chainhash.Hash, err error) {
-
-	if len(params) != 2 {
-		return nil, nil, wrongNumParams(len(params))
-	}
-
-	// Unmarshal first parameter as a string and convert to hash.
-	var th string
-	err = json.Unmarshal(params[0], &th)
-	if err != nil {
-		return nil, nil, err
-	}
-	thHash, err := chainhash.NewHashFromStr(th)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// Unmarshal second parameter as a string and convert to hash.
-	var ss string
-	err = json.Unmarshal(params[1], &ss)
-	if err != nil {
-		return nil, nil, err
-	}
-	ssHash, err := chainhash.NewHashFromStr(ss)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return thHash, ssHash, nil
-}
-
-// parseWalletLockStateNtfnParams parses out the account name and locked
-// state of an account from the parameters of a walletlockstate notification.
-func parseWalletLockStateNtfnParams(params []json.RawMessage) (account string,
-	locked bool, err error) {
-
-	if len(params) != 2 {
-		return "", false, wrongNumParams(len(params))
-	}
-
-	// Unmarshal first parameter as a string.
-	err = json.Unmarshal(params[0], &account)
-	if err != nil {
-		return "", false, err
-	}
-
-	// Unmarshal second parameter as a boolean.
-	err = json.Unmarshal(params[1], &locked)
-	if err != nil {
-		return "", false, err
-	}
-
-	return account, locked, nil
-}
-
 // FutureNotifyBlocksResult is a future promise to deliver the result of a
 // NotifyBlocksAsync RPC invocation (or an applicable error).
-type FutureNotifyBlocksResult chan *response
+type FutureNotifyBlocksResult cmdRes
 
 // Receive waits for the response promised by the future and returns an error
 // if the registration was not successful.
-func (r FutureNotifyBlocksResult) Receive() error {
-	_, err := receiveFuture(r)
+func (r *FutureNotifyBlocksResult) Receive() error {
+	_, err := receiveFuture(r.ctx, r.c)
+	return err
+}
+
+// FutureNotifyWorkResult is a future promise to deliver the result of a
+// NotifyWorkAsync RPC invocation (or an applicable error).
+type FutureNotifyWorkResult cmdRes
+
+// Receive waits for the response promised by the future and returns an error
+// if the registration was not successful.
+func (r *FutureNotifyWorkResult) Receive() error {
+	_, err := receiveFuture(r.ctx, r.c)
 	return err
 }
 
@@ -1144,20 +850,43 @@ func (r FutureNotifyBlocksResult) Receive() error {
 // See NotifyBlocks for the blocking version and more details.
 //
 // NOTE: This is a dcrd extension and requires a websocket connection.
-func (c *Client) NotifyBlocksAsync() FutureNotifyBlocksResult {
+func (c *Client) NotifyBlocksAsync(ctx context.Context) *FutureNotifyBlocksResult {
 	// Not supported in HTTP POST mode.
 	if c.config.HTTPPostMode {
-		return newFutureError(ErrWebsocketsRequired)
+		return (*FutureNotifyBlocksResult)(newFutureError(ctx, ErrWebsocketsRequired))
 	}
 
 	// Ignore the notification if the client is not interested in
 	// notifications.
 	if c.ntfnHandlers == nil {
-		return newNilFutureResult()
+		return (*FutureNotifyBlocksResult)(newNilFutureResult(ctx))
 	}
 
-	cmd := dcrjson.NewNotifyBlocksCmd()
-	return c.sendCmd(cmd)
+	cmd := chainjson.NewNotifyBlocksCmd()
+	return (*FutureNotifyBlocksResult)(c.sendCmd(ctx, cmd))
+}
+
+// NotifyWorkAsync returns an instance of a type that can be used to get the
+// result of the RPC at some future time by invoking the Receive function on
+// the returned instance.
+//
+// See NotifyWork for the blocking version and more details.
+//
+// NOTE: This is a dcrd extension and requires a websocket connection.
+func (c *Client) NotifyWorkAsync(ctx context.Context) *FutureNotifyWorkResult {
+	// Not supported in HTTP POST mode.
+	if c.config.HTTPPostMode {
+		return (*FutureNotifyWorkResult)(newFutureError(ctx, ErrWebsocketsRequired))
+	}
+
+	// Ignore the notification if the client is not interested in
+	// notifications.
+	if c.ntfnHandlers == nil {
+		return (*FutureNotifyWorkResult)(newNilFutureResult(ctx))
+	}
+
+	cmd := chainjson.NewNotifyWorkCmd()
+	return (*FutureNotifyWorkResult)(c.sendCmd(ctx, cmd))
 }
 
 // NotifyBlocks registers the client to receive notifications when blocks are
@@ -1170,47 +899,57 @@ func (c *Client) NotifyBlocksAsync() FutureNotifyBlocksResult {
 // OnBlockConnected or OnBlockDisconnected.
 //
 // NOTE: This is a dcrd extension and requires a websocket connection.
-func (c *Client) NotifyBlocks() error {
-	return c.NotifyBlocksAsync().Receive()
+func (c *Client) NotifyBlocks(ctx context.Context) error {
+	return c.NotifyBlocksAsync(ctx).Receive()
+}
+
+// NotifyWork registers the client to receive notifications when a new block
+// template has been generated.
+//
+// The notifications delivered as a result of this call will be via OnWork.
+//
+// NOTE: This is a dcrd extension and requires a websocket connection.
+func (c *Client) NotifyWork(ctx context.Context) error {
+	return c.NotifyWorkAsync(ctx).Receive()
 }
 
 // FutureNotifyWinningTicketsResult is a future promise to deliver the result of a
 // NotifyWinningTicketsAsync RPC invocation (or an applicable error).
-type FutureNotifyWinningTicketsResult chan *response
+type FutureNotifyWinningTicketsResult cmdRes
 
 // Receive waits for the response promised by the future and returns an error
 // if the registration was not successful.
-func (r FutureNotifyWinningTicketsResult) Receive() error {
-	_, err := receiveFuture(r)
+func (r *FutureNotifyWinningTicketsResult) Receive() error {
+	_, err := receiveFuture(r.ctx, r.c)
 	return err
 }
 
 // NotifyWinningTicketsAsync returns an instance of a type that can be used
-// to  get the result of the RPC at some future time by invoking the Receive
+// to get the result of the RPC at some future time by invoking the Receive
 // function on the returned instance.
 //
 // See NotifyWinningTickets for the blocking version and more details.
 //
 // NOTE: This is a dcrd extension and requires a websocket connection.
-func (c *Client) NotifyWinningTicketsAsync() FutureNotifyWinningTicketsResult {
+func (c *Client) NotifyWinningTicketsAsync(ctx context.Context) *FutureNotifyWinningTicketsResult {
 	// Not supported in HTTP POST mode.
 	if c.config.HTTPPostMode {
-		return newFutureError(ErrWebsocketsRequired)
+		return (*FutureNotifyWinningTicketsResult)(newFutureError(ctx, ErrWebsocketsRequired))
 	}
 
 	// Ignore the notification if the client is not interested in
 	// notifications.
 	if c.ntfnHandlers == nil {
-		return newNilFutureResult()
+		return (*FutureNotifyWinningTicketsResult)(newNilFutureResult(ctx))
 	}
 
-	cmd := dcrjson.NewNotifyWinningTicketsCmd()
+	cmd := chainjson.NewNotifyWinningTicketsCmd()
 
-	return c.sendCmd(cmd)
+	return (*FutureNotifyWinningTicketsResult)(c.sendCmd(ctx, cmd))
 }
 
 // NotifyWinningTickets registers the client to receive notifications when
-// blocks are connected to the main chain and tickets are spent or missed.  The
+// blocks are connected to the main chain and tickets are chosen to vote.  The
 // notifications are delivered to the notification handlers associated with the
 // client.  Calling this function has no effect if there are no notification
 // handlers and will result in an error if the client is configured to run in HTTP
@@ -1220,43 +959,43 @@ func (c *Client) NotifyWinningTicketsAsync() FutureNotifyWinningTicketsResult {
 // OnWinningTickets.
 //
 // NOTE: This is a dcrd extension and requires a websocket connection.
-func (c *Client) NotifyWinningTickets() error {
-	return c.NotifyWinningTicketsAsync().Receive()
+func (c *Client) NotifyWinningTickets(ctx context.Context) error {
+	return c.NotifyWinningTicketsAsync(ctx).Receive()
 }
 
 // FutureNotifySpentAndMissedTicketsResult is a future promise to deliver the result of a
 // NotifySpentAndMissedTicketsAsync RPC invocation (or an applicable error).
-type FutureNotifySpentAndMissedTicketsResult chan *response
+type FutureNotifySpentAndMissedTicketsResult cmdRes
 
 // Receive waits for the response promised by the future and returns an error
 // if the registration was not successful.
-func (r FutureNotifySpentAndMissedTicketsResult) Receive() error {
-	_, err := receiveFuture(r)
+func (r *FutureNotifySpentAndMissedTicketsResult) Receive() error {
+	_, err := receiveFuture(r.ctx, r.c)
 	return err
 }
 
 // NotifySpentAndMissedTicketsAsync returns an instance of a type that can be used
-// to  get the result of the RPC at some future time by invoking the Receive
+// to get the result of the RPC at some future time by invoking the Receive
 // function on the returned instance.
 //
 // See NotifySpentAndMissedTickets for the blocking version and more details.
 //
 // NOTE: This is a dcrd extension and requires a websocket connection.
-func (c *Client) NotifySpentAndMissedTicketsAsync() FutureNotifySpentAndMissedTicketsResult {
+func (c *Client) NotifySpentAndMissedTicketsAsync(ctx context.Context) *FutureNotifySpentAndMissedTicketsResult {
 	// Not supported in HTTP POST mode.
 	if c.config.HTTPPostMode {
-		return newFutureError(ErrWebsocketsRequired)
+		return (*FutureNotifySpentAndMissedTicketsResult)(newFutureError(ctx, ErrWebsocketsRequired))
 	}
 
 	// Ignore the notification if the client is not interested in
 	// notifications.
 	if c.ntfnHandlers == nil {
-		return newNilFutureResult()
+		return (*FutureNotifySpentAndMissedTicketsResult)(newNilFutureResult(ctx))
 	}
 
-	cmd := dcrjson.NewNotifySpentAndMissedTicketsCmd()
+	cmd := chainjson.NewNotifySpentAndMissedTicketsCmd()
 
-	return c.sendCmd(cmd)
+	return (*FutureNotifySpentAndMissedTicketsResult)(c.sendCmd(ctx, cmd))
 }
 
 // NotifySpentAndMissedTickets registers the client to receive notifications when
@@ -1270,18 +1009,18 @@ func (c *Client) NotifySpentAndMissedTicketsAsync() FutureNotifySpentAndMissedTi
 // OnSpentAndMissedTickets.
 //
 // NOTE: This is a dcrd extension and requires a websocket connection.
-func (c *Client) NotifySpentAndMissedTickets() error {
-	return c.NotifySpentAndMissedTicketsAsync().Receive()
+func (c *Client) NotifySpentAndMissedTickets(ctx context.Context) error {
+	return c.NotifySpentAndMissedTicketsAsync(ctx).Receive()
 }
 
 // FutureNotifyNewTicketsResult is a future promise to deliver the result of a
 // NotifyNewTicketsAsync RPC invocation (or an applicable error).
-type FutureNotifyNewTicketsResult chan *response
+type FutureNotifyNewTicketsResult cmdRes
 
 // Receive waits for the response promised by the future and returns an error
 // if the registration was not successful.
-func (r FutureNotifyNewTicketsResult) Receive() error {
-	_, err := receiveFuture(r)
+func (r *FutureNotifyNewTicketsResult) Receive() error {
+	_, err := receiveFuture(r.ctx, r.c)
 	return err
 }
 
@@ -1292,21 +1031,21 @@ func (r FutureNotifyNewTicketsResult) Receive() error {
 // See NotifyNewTickets for the blocking version and more details.
 //
 // NOTE: This is a dcrd extension and requires a websocket connection.
-func (c *Client) NotifyNewTicketsAsync() FutureNotifyNewTicketsResult {
+func (c *Client) NotifyNewTicketsAsync(ctx context.Context) *FutureNotifyNewTicketsResult {
 	// Not supported in HTTP POST mode.
 	if c.config.HTTPPostMode {
-		return newFutureError(ErrWebsocketsRequired)
+		return (*FutureNotifyNewTicketsResult)(newFutureError(ctx, ErrWebsocketsRequired))
 	}
 
 	// Ignore the notification if the client is not interested in
 	// notifications.
 	if c.ntfnHandlers == nil {
-		return newNilFutureResult()
+		return (*FutureNotifyNewTicketsResult)(newNilFutureResult(ctx))
 	}
 
-	cmd := dcrjson.NewNotifyNewTicketsCmd()
+	cmd := chainjson.NewNotifyNewTicketsCmd()
 
-	return c.sendCmd(cmd)
+	return (*FutureNotifyNewTicketsResult)(c.sendCmd(ctx, cmd))
 }
 
 // NotifyNewTickets registers the client to receive notifications when blocks are
@@ -1318,18 +1057,18 @@ func (c *Client) NotifyNewTicketsAsync() FutureNotifyNewTicketsResult {
 // The notifications delivered as a result of this call will be via OnNewTickets.
 //
 // NOTE: This is a dcrd extension and requires a websocket connection.
-func (c *Client) NotifyNewTickets() error {
-	return c.NotifyNewTicketsAsync().Receive()
+func (c *Client) NotifyNewTickets(ctx context.Context) error {
+	return c.NotifyNewTicketsAsync(ctx).Receive()
 }
 
 // FutureNotifyStakeDifficultyResult is a future promise to deliver the result of a
 // NotifyStakeDifficultyAsync RPC invocation (or an applicable error).
-type FutureNotifyStakeDifficultyResult chan *response
+type FutureNotifyStakeDifficultyResult cmdRes
 
 // Receive waits for the response promised by the future and returns an error
 // if the registration was not successful.
-func (r FutureNotifyStakeDifficultyResult) Receive() error {
-	_, err := receiveFuture(r)
+func (r *FutureNotifyStakeDifficultyResult) Receive() error {
+	_, err := receiveFuture(r.ctx, r.c)
 	return err
 }
 
@@ -1340,21 +1079,21 @@ func (r FutureNotifyStakeDifficultyResult) Receive() error {
 // See NotifyStakeDifficulty for the blocking version and more details.
 //
 // NOTE: This is a dcrd extension and requires a websocket connection.
-func (c *Client) NotifyStakeDifficultyAsync() FutureNotifyStakeDifficultyResult {
+func (c *Client) NotifyStakeDifficultyAsync(ctx context.Context) *FutureNotifyStakeDifficultyResult {
 	// Not supported in HTTP POST mode.
 	if c.config.HTTPPostMode {
-		return newFutureError(ErrWebsocketsRequired)
+		return (*FutureNotifyStakeDifficultyResult)(newFutureError(ctx, ErrWebsocketsRequired))
 	}
 
 	// Ignore the notification if the client is not interested in
 	// notifications.
 	if c.ntfnHandlers == nil {
-		return newNilFutureResult()
+		return (*FutureNotifyStakeDifficultyResult)(newNilFutureResult(ctx))
 	}
 
-	cmd := dcrjson.NewNotifyStakeDifficultyCmd()
+	cmd := chainjson.NewNotifyStakeDifficultyCmd()
 
-	return c.sendCmd(cmd)
+	return (*FutureNotifyStakeDifficultyResult)(c.sendCmd(ctx, cmd))
 }
 
 // NotifyStakeDifficulty registers the client to receive notifications when
@@ -1368,18 +1107,18 @@ func (c *Client) NotifyStakeDifficultyAsync() FutureNotifyStakeDifficultyResult 
 // OnStakeDifficulty.
 //
 // NOTE: This is a dcrd extension and requires a websocket connection.
-func (c *Client) NotifyStakeDifficulty() error {
-	return c.NotifyStakeDifficultyAsync().Receive()
+func (c *Client) NotifyStakeDifficulty(ctx context.Context) error {
+	return c.NotifyStakeDifficultyAsync(ctx).Receive()
 }
 
 // FutureNotifyNewTransactionsResult is a future promise to deliver the result
 // of a NotifyNewTransactionsAsync RPC invocation (or an applicable error).
-type FutureNotifyNewTransactionsResult chan *response
+type FutureNotifyNewTransactionsResult cmdRes
 
 // Receive waits for the response promised by the future and returns an error
 // if the registration was not successful.
-func (r FutureNotifyNewTransactionsResult) Receive() error {
-	_, err := receiveFuture(r)
+func (r *FutureNotifyNewTransactionsResult) Receive() error {
+	_, err := receiveFuture(r.ctx, r.c)
 	return err
 }
 
@@ -1387,23 +1126,23 @@ func (r FutureNotifyNewTransactionsResult) Receive() error {
 // get the result of the RPC at some future time by invoking the Receive
 // function on the returned instance.
 //
-// See NotifyNewTransactionsAsync for the blocking version and more details.
+// See NotifyNewTransactions for the blocking version and more details.
 //
 // NOTE: This is a dcrd extension and requires a websocket connection.
-func (c *Client) NotifyNewTransactionsAsync(verbose bool) FutureNotifyNewTransactionsResult {
+func (c *Client) NotifyNewTransactionsAsync(ctx context.Context, verbose bool) *FutureNotifyNewTransactionsResult {
 	// Not supported in HTTP POST mode.
 	if c.config.HTTPPostMode {
-		return newFutureError(ErrWebsocketsRequired)
+		return (*FutureNotifyNewTransactionsResult)(newFutureError(ctx, ErrWebsocketsRequired))
 	}
 
 	// Ignore the notification if the client is not interested in
 	// notifications.
 	if c.ntfnHandlers == nil {
-		return newNilFutureResult()
+		return (*FutureNotifyNewTransactionsResult)(newNilFutureResult(ctx))
 	}
 
-	cmd := dcrjson.NewNotifyNewTransactionsCmd(&verbose)
-	return c.sendCmd(cmd)
+	cmd := chainjson.NewNotifyNewTransactionsCmd(&verbose)
+	return (*FutureNotifyNewTransactionsResult)(c.sendCmd(ctx, cmd))
 }
 
 // NotifyNewTransactions registers the client to receive notifications every
@@ -1417,18 +1156,18 @@ func (c *Client) NotifyNewTransactionsAsync(verbose bool) FutureNotifyNewTransac
 // true).
 //
 // NOTE: This is a dcrd extension and requires a websocket connection.
-func (c *Client) NotifyNewTransactions(verbose bool) error {
-	return c.NotifyNewTransactionsAsync(verbose).Receive()
+func (c *Client) NotifyNewTransactions(ctx context.Context, verbose bool) error {
+	return c.NotifyNewTransactionsAsync(ctx, verbose).Receive()
 }
 
 // FutureLoadTxFilterResult is a future promise to deliver the result
 // of a LoadTxFilterAsync RPC invocation (or an applicable error).
-type FutureLoadTxFilterResult chan *response
+type FutureLoadTxFilterResult cmdRes
 
 // Receive waits for the response promised by the future and returns an error
 // if the registration was not successful.
-func (r FutureLoadTxFilterResult) Receive() error {
-	_, err := receiveFuture(r)
+func (r *FutureLoadTxFilterResult) Receive() error {
+	_, err := receiveFuture(r.ctx, r.c)
 	return err
 }
 
@@ -1439,24 +1178,24 @@ func (r FutureLoadTxFilterResult) Receive() error {
 // See LoadTxFilter for the blocking version and more details.
 //
 // NOTE: This is a dcrd extension and requires a websocket connection.
-func (c *Client) LoadTxFilterAsync(reload bool, addresses []dcrutil.Address,
-	outPoints []wire.OutPoint) FutureLoadTxFilterResult {
+func (c *Client) LoadTxFilterAsync(ctx context.Context, reload bool, addresses []dcrutil.Address,
+	outPoints []wire.OutPoint) *FutureLoadTxFilterResult {
 
 	addrStrs := make([]string, len(addresses))
 	for i, a := range addresses {
-		addrStrs[i] = a.EncodeAddress()
+		addrStrs[i] = a.Address()
 	}
-	outPointObjects := make([]dcrjson.OutPoint, len(outPoints))
+	outPointObjects := make([]chainjson.OutPoint, len(outPoints))
 	for i := range outPoints {
-		outPointObjects[i] = dcrjson.OutPoint{
+		outPointObjects[i] = chainjson.OutPoint{
 			Hash:  outPoints[i].Hash.String(),
 			Index: outPoints[i].Index,
 			Tree:  outPoints[i].Tree,
 		}
 	}
 
-	cmd := dcrjson.NewLoadTxFilterCmd(reload, addrStrs, outPointObjects)
-	return c.sendCmd(cmd)
+	cmd := chainjson.NewLoadTxFilterCmd(reload, addrStrs, outPointObjects)
+	return (*FutureLoadTxFilterResult)(c.sendCmd(ctx, cmd))
 }
 
 // LoadTxFilter loads, reloads, or adds data to a websocket client's transaction
@@ -1464,6 +1203,6 @@ func (c *Client) LoadTxFilterAsync(reload bool, addresses []dcrutil.Address,
 // during mempool acceptance, block acceptance, and for all rescanned blocks.
 //
 // NOTE: This is a dcrd extension and requires a websocket connection.
-func (c *Client) LoadTxFilter(reload bool, addresses []dcrutil.Address, outPoints []wire.OutPoint) error {
-	return c.LoadTxFilterAsync(reload, addresses, outPoints).Receive()
+func (c *Client) LoadTxFilter(ctx context.Context, reload bool, addresses []dcrutil.Address, outPoints []wire.OutPoint) error {
+	return c.LoadTxFilterAsync(ctx, reload, addresses, outPoints).Receive()
 }

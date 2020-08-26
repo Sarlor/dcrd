@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package wire
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -119,15 +120,15 @@ func TestElementWire(t *testing.T) {
 			},
 		},
 		{
-			ServiceFlag(SFNodeNetwork),
+			SFNodeNetwork,
 			[]byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 		},
 		{
-			InvType(InvTypeTx),
+			InvTypeTx,
 			[]byte{0x01, 0x00, 0x00, 0x00},
 		},
 		{
-			CurrencyNet(MainNet),
+			MainNet,
 			[]byte{0xf9, 0x00, 0xb4, 0xd9},
 		},
 		// Type not supported by the "fast" path and requires reflection.
@@ -212,9 +213,9 @@ func TestElementWireErrors(t *testing.T) {
 			}),
 			0, io.ErrShortWrite, io.EOF,
 		},
-		{ServiceFlag(SFNodeNetwork), 0, io.ErrShortWrite, io.EOF},
-		{InvType(InvTypeTx), 0, io.ErrShortWrite, io.EOF},
-		{CurrencyNet(MainNet), 0, io.ErrShortWrite, io.EOF},
+		{SFNodeNetwork, 0, io.ErrShortWrite, io.EOF},
+		{InvTypeTx, 0, io.ErrShortWrite, io.EOF},
+		{MainNet, 0, io.ErrShortWrite, io.EOF},
 	}
 
 	t.Logf("Running %d tests", len(tests))
@@ -222,7 +223,7 @@ func TestElementWireErrors(t *testing.T) {
 		// Encode to wire format.
 		w := newFixedWriter(test.max)
 		err := writeElement(w, test.in)
-		if err != test.writeErr {
+		if !errors.Is(err, test.writeErr) {
 			t.Errorf("writeElement #%d wrong error got: %v, want: %v",
 				i, err, test.writeErr)
 			continue
@@ -235,7 +236,7 @@ func TestElementWireErrors(t *testing.T) {
 			val = reflect.New(reflect.TypeOf(test.in)).Interface()
 		}
 		err = readElement(r, val)
-		if err != test.readErr {
+		if !errors.Is(err, test.readErr) {
 			t.Errorf("readElement #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
 			continue
@@ -338,7 +339,7 @@ func TestVarIntWireErrors(t *testing.T) {
 		// Encode to wire format.
 		w := newFixedWriter(test.max)
 		err := WriteVarInt(w, test.pver, test.in)
-		if err != test.writeErr {
+		if !errors.Is(err, test.writeErr) {
 			t.Errorf("WriteVarInt #%d wrong error got: %v, want: %v",
 				i, err, test.writeErr)
 			continue
@@ -347,7 +348,7 @@ func TestVarIntWireErrors(t *testing.T) {
 		// Decode from wire format.
 		r := newFixedReader(test.max, test.buf)
 		_, err = ReadVarInt(r, test.pver)
-		if err != test.readErr {
+		if !errors.Is(err, test.readErr) {
 			t.Errorf("ReadVarInt #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
 			continue
@@ -366,20 +367,24 @@ func TestVarIntNonCanonical(t *testing.T) {
 		pver uint32 // Protocol version for wire encoding
 	}{
 		{
-			"0 encoded with 3 bytes", []byte{0xfd, 0x00, 0x00},
+			"0 encoded with 3 bytes",
+			[]byte{0xfd, 0x00, 0x00},
 			pver,
 		},
 		{
 			"max single-byte value encoded with 3 bytes",
-			[]byte{0xfd, 0xfc, 0x00}, pver,
+			[]byte{0xfd, 0xfc, 0x00},
+			pver,
 		},
 		{
 			"0 encoded with 5 bytes",
-			[]byte{0xfe, 0x00, 0x00, 0x00, 0x00}, pver,
+			[]byte{0xfe, 0x00, 0x00, 0x00, 0x00},
+			pver,
 		},
 		{
 			"max three-byte value encoded with 5 bytes",
-			[]byte{0xfe, 0xff, 0xff, 0x00, 0x00}, pver,
+			[]byte{0xfe, 0xff, 0xff, 0x00, 0x00},
+			pver,
 		},
 		{
 			"0 encoded with 9 bytes",
@@ -398,7 +403,8 @@ func TestVarIntNonCanonical(t *testing.T) {
 		// Decode from wire format.
 		rbuf := bytes.NewReader(test.in)
 		val, err := ReadVarInt(rbuf, test.pver)
-		if _, ok := err.(*MessageError); !ok {
+		var merr *MessageError
+		if !errors.As(err, &merr) {
 			t.Errorf("ReadVarInt #%d (%s) unexpected error %v", i,
 				test.name, err)
 			continue
@@ -528,7 +534,7 @@ func TestVarStringWireErrors(t *testing.T) {
 		// Encode to wire format.
 		w := newFixedWriter(test.max)
 		err := WriteVarString(w, test.pver, test.in)
-		if err != test.writeErr {
+		if !errors.Is(err, test.writeErr) {
 			t.Errorf("WriteVarString #%d wrong error got: %v, want: %v",
 				i, err, test.writeErr)
 			continue
@@ -537,7 +543,7 @@ func TestVarStringWireErrors(t *testing.T) {
 		// Decode from wire format.
 		r := newFixedReader(test.max, test.buf)
 		_, err = ReadVarString(r, test.pver)
-		if err != test.readErr {
+		if !errors.Is(err, test.readErr) {
 			t.Errorf("ReadVarString #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
 			continue
@@ -557,10 +563,14 @@ func TestVarStringOverflowErrors(t *testing.T) {
 		pver uint32 // Protocol version for wire encoding
 		err  error  // Expected error
 	}{
-		{[]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
-			pver, &MessageError{}},
-		{[]byte{0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
-			pver, &MessageError{}},
+		{
+			[]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+			pver, &MessageError{},
+		},
+		{
+			[]byte{0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
+			pver, &MessageError{},
+		},
 	}
 
 	t.Logf("Running %d tests", len(tests))
@@ -574,7 +584,6 @@ func TestVarStringOverflowErrors(t *testing.T) {
 			continue
 		}
 	}
-
 }
 
 // TestVarBytesWire tests wire encode and decode for variable length byte array.
@@ -659,7 +668,7 @@ func TestVarBytesWireErrors(t *testing.T) {
 		// Encode to wire format.
 		w := newFixedWriter(test.max)
 		err := WriteVarBytes(w, test.pver, test.in)
-		if err != test.writeErr {
+		if !errors.Is(err, test.writeErr) {
 			t.Errorf("WriteVarBytes #%d wrong error got: %v, want: %v",
 				i, err, test.writeErr)
 			continue
@@ -669,7 +678,7 @@ func TestVarBytesWireErrors(t *testing.T) {
 		r := newFixedReader(test.max, test.buf)
 		_, err = ReadVarBytes(r, test.pver, MaxMessagePayload,
 			"test payload")
-		if err != test.readErr {
+		if !errors.Is(err, test.readErr) {
 			t.Errorf("ReadVarBytes #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
 			continue
@@ -689,10 +698,16 @@ func TestVarBytesOverflowErrors(t *testing.T) {
 		pver uint32 // Protocol version for wire encoding
 		err  error  // Expected error
 	}{
-		{[]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
-			pver, &MessageError{}},
-		{[]byte{0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
-			pver, &MessageError{}},
+		{
+			[]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+			pver,
+			&MessageError{},
+		},
+		{
+			[]byte{0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
+			pver,
+			&MessageError{},
+		},
 	}
 
 	t.Logf("Running %d tests", len(tests))
@@ -707,7 +722,6 @@ func TestVarBytesOverflowErrors(t *testing.T) {
 			continue
 		}
 	}
-
 }
 
 // TestRandomUint64 exercises the randomness of the random number generator on
@@ -750,7 +764,7 @@ func TestRandomUint64Errors(t *testing.T) {
 	// Test short reads.
 	fr := &fakeRandReader{n: 2, err: io.EOF}
 	nonce, err := randomUint64(fr)
-	if err != io.ErrUnexpectedEOF {
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Errorf("Error not expected value of %v [%v]",
 			io.ErrUnexpectedEOF, err)
 	}

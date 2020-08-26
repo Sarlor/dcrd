@@ -1,5 +1,5 @@
 // Copyright (c) 2016 The btcsuite developers
-// Copyright (c) 2016-2018 The Decred developers
+// Copyright (c) 2016-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,18 +7,20 @@ package blockchain_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"testing"
 
-	"github.com/decred/dcrd/blockchain"
-	"github.com/decred/dcrd/blockchain/fullblocktests"
-	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/blockchain/v3"
+	"github.com/decred/dcrd/blockchain/v3/fullblocktests"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/dcrutil"
-	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/database/v2"
+	"github.com/decred/dcrd/dcrutil/v3"
+	"github.com/decred/dcrd/txscript/v3"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -29,16 +31,6 @@ const (
 	// blockDataNet is the expected network in the test block data.
 	blockDataNet = wire.MainNet
 )
-
-// filesExists returns whether or not the named file or directory exists.
-func fileExists(name string) bool {
-	if _, err := os.Stat(name); err != nil {
-		if os.IsNotExist(err) {
-			return false
-		}
-	}
-	return true
-}
 
 // isSupportedDbType returns whether or not the passed database type is
 // currently supported.
@@ -107,12 +99,13 @@ func chainSetup(dbName string, params *chaincfg.Params) (*blockchain.BlockChain,
 	paramsCopy := *params
 
 	// Create the main chain instance.
-	chain, err := blockchain.New(&blockchain.Config{
-		DB:          db,
-		ChainParams: &paramsCopy,
-		TimeSource:  blockchain.NewMedianTime(),
-		SigCache:    txscript.NewSigCache(1000),
-	})
+	chain, err := blockchain.New(context.Background(),
+		&blockchain.Config{
+			DB:          db,
+			ChainParams: &paramsCopy,
+			TimeSource:  blockchain.NewMedianTime(),
+			SigCache:    txscript.NewSigCache(1000),
+		})
 
 	if err != nil {
 		teardown()
@@ -133,7 +126,7 @@ func TestFullBlocks(t *testing.T) {
 
 	// Create a new database and chain instance to run tests against.
 	chain, teardownFunc, err := chainSetup("fullblocktest",
-		&chaincfg.RegNetParams)
+		chaincfg.RegNetParams())
 	if err != nil {
 		t.Fatalf("Failed to setup chain instance: %v", err)
 	}
@@ -148,12 +141,16 @@ func TestFullBlocks(t *testing.T) {
 		t.Logf("Testing block %s (hash %s, height %d)",
 			item.Name, block.Hash(), blockHeight)
 
-		forkLen, isOrphan, err := chain.ProcessBlock(block,
-			blockchain.BFNone)
+		var isOrphan bool
+		forkLen, err := chain.ProcessBlock(block, blockchain.BFNone)
+		if blockchain.IsErrorCode(err, blockchain.ErrMissingParent) {
+			isOrphan = true
+			err = nil
+		}
 		if err != nil {
-			t.Fatalf("block %q (hash %s, height %d) should "+
-				"have been accepted: %v", item.Name,
-				block.Hash(), blockHeight, err)
+			t.Fatalf("block %q (hash %s, height %d) should have "+
+				"been accepted: %v", item.Name, block.Hash(),
+				blockHeight, err)
 		}
 
 		// Ensure the main chain and orphan flags match the values
@@ -182,7 +179,7 @@ func TestFullBlocks(t *testing.T) {
 		t.Logf("Testing block %s (hash %s, height %d)",
 			item.Name, block.Hash(), blockHeight)
 
-		_, _, err := chain.ProcessBlock(block, blockchain.BFNone)
+		_, err := chain.ProcessBlock(block, blockchain.BFNone)
 		if err == nil {
 			t.Fatalf("block %q (hash %s, height %d) should not "+
 				"have been accepted", item.Name, block.Hash(),
@@ -191,8 +188,8 @@ func TestFullBlocks(t *testing.T) {
 
 		// Ensure the error code is of the expected type and the reject
 		// code matches the value specified in the test instance.
-		rerr, ok := err.(blockchain.RuleError)
-		if !ok {
+		var rerr blockchain.RuleError
+		if !errors.As(err, &rerr) {
 			t.Fatalf("block %q (hash %s, height %d) returned "+
 				"unexpected error type -- got %T, want "+
 				"blockchain.RuleError", item.Name, block.Hash(),
@@ -223,7 +220,8 @@ func TestFullBlocks(t *testing.T) {
 		// Ensure there is an error due to deserializing the block.
 		var msgBlock wire.MsgBlock
 		err := msgBlock.BtcDecode(bytes.NewReader(item.RawBlock), 0)
-		if _, ok := err.(*wire.MessageError); !ok {
+		var werr *wire.MessageError
+		if !errors.As(err, &werr) {
 			t.Fatalf("block %q (hash %s, height %d) should have "+
 				"failed to decode", item.Name, blockHash,
 				blockHeight)
@@ -239,22 +237,19 @@ func TestFullBlocks(t *testing.T) {
 		t.Logf("Testing block %s (hash %s, height %d)",
 			item.Name, block.Hash(), blockHeight)
 
-		_, isOrphan, err := chain.ProcessBlock(block, blockchain.BFNone)
+		_, err := chain.ProcessBlock(block, blockchain.BFNone)
 		if err != nil {
-			// Ensure the error code is of the expected type.
-			if _, ok := err.(blockchain.RuleError); !ok {
+			// Ensure the error code is of the expected type.  Note
+			// that orphans are rejected with ErrMissingParent, so
+			// this check covers both conditions.
+			var rerr blockchain.RuleError
+			if !errors.As(err, &rerr) {
 				t.Fatalf("block %q (hash %s, height %d) "+
 					"returned unexpected error type -- "+
 					"got %T, want blockchain.RuleError",
 					item.Name, block.Hash(), blockHeight,
 					err)
 			}
-		}
-
-		if !isOrphan {
-			t.Fatalf("block %q (hash %s, height %d) was accepted, "+
-				"but is not considered an orphan", item.Name,
-				block.Hash(), blockHeight)
 		}
 	}
 

@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package wire
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -43,6 +44,13 @@ func TestTx(t *testing.T) {
 		t.Errorf("MaxPayloadLength: wrong max payload length for "+
 			"protocol version %d - got %v, want %v", pver,
 			maxPayload, wantPayload)
+	}
+
+	// Ensure max payload length is not more than MaxMessagePayload.
+	if maxPayload > MaxMessagePayload {
+		t.Fatalf("MaxPayloadLength: payload length (%v) for protocol "+
+			"version %d exceeds MaxMessagePayload (%v).", maxPayload, pver,
+			MaxMessagePayload)
 	}
 
 	// Ensure max payload is expected value for protocol version 3.
@@ -106,7 +114,6 @@ func TestTx(t *testing.T) {
 	if txOut.Value != txValue {
 		t.Errorf("NewTxOut: wrong pk script - got %v, want %v",
 			txOut.Value, txValue)
-
 	}
 	if !bytes.Equal(txOut.PkScript, pkScript) {
 		t.Errorf("NewTxOut: wrong pk script - got %v, want %v",
@@ -319,7 +326,7 @@ func TestTxWireErrors(t *testing.T) {
 		// Encode to wire format.
 		w := newFixedWriter(test.max)
 		err := test.in.BtcEncode(w, test.pver)
-		if err != test.writeErr {
+		if !errors.Is(err, test.writeErr) {
 			t.Errorf("BtcEncode #%d wrong error got: %v, want: %v",
 				i, err, test.writeErr)
 			continue
@@ -329,7 +336,7 @@ func TestTxWireErrors(t *testing.T) {
 		var msg MsgTx
 		r := newFixedReader(test.max, test.buf)
 		err = msg.BtcDecode(r, test.pver)
-		if err != test.readErr {
+		if !errors.Is(err, test.readErr) {
 			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
 			continue
@@ -671,7 +678,7 @@ func TestTxSerializeErrors(t *testing.T) {
 		// Serialize the transaction.
 		w := newFixedWriter(test.max)
 		err := test.in.Serialize(w)
-		if err != test.writeErr {
+		if !errors.Is(err, test.writeErr) {
 			t.Errorf("Serialize #%d wrong error got: %v, want: %v",
 				i, err, test.writeErr)
 			continue
@@ -681,7 +688,7 @@ func TestTxSerializeErrors(t *testing.T) {
 		var tx MsgTx
 		r := newFixedReader(test.max, test.buf)
 		err = tx.Deserialize(r)
-		if err != test.readErr {
+		if !errors.Is(err, test.readErr) {
 			t.Errorf("Deserialize #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
 			continue
@@ -783,7 +790,7 @@ func TestTxOverflowErrors(t *testing.T) {
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Previous output hash
-				0xff, 0xff, 0xff, 0xff, // Prevous output index
+				0xff, 0xff, 0xff, 0xff, // Previous output index
 				0x00,                   // Previous output tree
 				0x00,                   // Varint for length of signature script
 				0xff, 0xff, 0xff, 0xff, // Sequence
@@ -828,7 +835,7 @@ func TestTxSerializeSize(t *testing.T) {
 		in   *MsgTx // Tx to encode
 		size int    // Expected serialized size
 	}{
-		// No inputs or outpus.
+		// No inputs or outputs.
 		{noTx, 15},
 
 		// Transaction with an input and an output.

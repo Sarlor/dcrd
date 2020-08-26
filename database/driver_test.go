@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -9,20 +9,12 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/decred/dcrd/database"
-	_ "github.com/decred/dcrd/database/ffldb"
-)
-
-var (
-	// ignoreDbTypes are types which should be ignored when running tests
-	// that iterate all supported DB types.  This allows some tests to add
-	// bogus drivers for testing purposes while still allowing other tests
-	// to easily iterate all supported drivers.
-	ignoreDbTypes = map[string]bool{"createopenfail": true}
+	"github.com/decred/dcrd/database/v2"
+	_ "github.com/decred/dcrd/database/v2/ffldb"
 )
 
 // checkDbError ensures the passed error is a database.Error with an error code
-// that matches the passed  error code.
+// that matches the passed error code.
 func checkDbError(t *testing.T, testName string, gotErr error, wantErrCode database.ErrorCode) bool {
 	dbErr, ok := gotErr.(database.Error)
 	if !ok {

@@ -1,4 +1,4 @@
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -13,12 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/decred/dcrd/blockchain/stake/internal/dbnamespace"
-	"github.com/decred/dcrd/blockchain/stake/internal/tickettreap"
-	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/blockchain/stake/v3/internal/dbnamespace"
+	"github.com/decred/dcrd/blockchain/stake/v3/internal/tickettreap"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
-	_ "github.com/decred/dcrd/database/ffldb"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/database/v2"
+	_ "github.com/decred/dcrd/database/v2/ffldb"
 )
 
 const (
@@ -187,7 +187,6 @@ func TestBestChainStateSerialization(t *testing.T) {
 				"mismatched state - got %v, want %v", i,
 				test.name, state, test.state)
 			continue
-
 		}
 	}
 }
@@ -281,7 +280,6 @@ func TestBlockUndoDataSerializing(t *testing.T) {
 				"mismatched state - got %v, want %v", i,
 				test.name, utds, test.utds)
 			continue
-
 		}
 	}
 }
@@ -371,7 +369,6 @@ func TestTicketHashesSerializing(t *testing.T) {
 				"mismatched state - got %v, want %v", i,
 				test.name, ths, test.ths)
 			continue
-
 		}
 	}
 }
@@ -425,16 +422,15 @@ func TestLiveDatabase(t *testing.T) {
 		t.Fatalf("unable to create test db path: %v", err)
 	}
 	defer os.RemoveAll(dbPath)
-	testDb, err := database.Create(testDbType, dbPath, chaincfg.RegNetParams.Net)
+	net := chaincfg.RegNetParams().Net
+	testDb, err := database.Create(testDbType, dbPath, net)
 	if err != nil {
 		t.Fatalf("error creating db: %v", err)
 	}
 	defer testDb.Close()
 
 	// Initialize the database, then try to read the version.
-	err = testDb.Update(func(dbTx database.Tx) error {
-		return DbCreate(dbTx)
-	})
+	err = testDb.Update(DbCreate)
 	if err != nil {
 		t.Fatalf("%v", err.Error())
 	}

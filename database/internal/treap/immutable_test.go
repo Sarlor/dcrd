@@ -255,7 +255,7 @@ func TestImmutableReverseSequential(t *testing.T) {
 }
 
 // TestImmutableUnordered ensures that putting keys into an immutable treap in
-// no paritcular order works as expected.
+// no particular order works as expected.
 func TestImmutableUnordered(t *testing.T) {
 	t.Parallel()
 
@@ -345,7 +345,7 @@ func TestImmutableDuplicatePut(t *testing.T) {
 		testTreap = testTreap.Put(key, key)
 		expectedSize += nodeFieldsSize + uint64(len(key)+len(key))
 
-		// Put a duplicate key with the the expected final value.
+		// Put a duplicate key with the expected final value.
 		testTreap = testTreap.Put(key, expectedVal)
 
 		// Ensure the key still exists and is the new value.

@@ -1,5 +1,5 @@
 // Copyright (c) 2014-2015 The btcsuite developers
-// Copyright (c) 2015-2018 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -12,15 +12,13 @@ import (
 // log is a logger that is initialized with no output filters.  This
 // means the package will not perform any logging by default until the caller
 // requests it.
-var log slog.Logger
-
 // The default amount of logging is none.
-func init() {
-	DisableLog()
-}
+var log = slog.Disabled
 
 // DisableLog disables all library log output.  Logging output is disabled
 // by default until UseLogger is called.
+//
+// Deprecated: Use UseLogger(slog.Disabled) instead.
 func DisableLog() {
 	log = slog.Disabled
 }

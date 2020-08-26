@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -19,7 +19,7 @@ import (
 	"sync"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
+	"github.com/decred/dcrd/database/v2"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -134,10 +134,10 @@ type blockStore struct {
 	// lruMutex protects concurrent access to the least recently used list
 	// and lookup map.
 	//
-	// openBlocksLRU tracks how the open files are refenced by pushing the
+	// openBlocksLRU tracks how the open files are referenced by pushing the
 	// most recently used files to the front of the list thereby trickling
 	// the least recently used files to end of the list.  When a file needs
-	// to be closed due to exceeding the the max number of allowed open
+	// to be closed due to exceeding the max number of allowed open
 	// files, the one at the end of the list is closed.
 	//
 	// fileNumToLRUElem is a mapping between a specific block file number
@@ -478,7 +478,7 @@ func (s *blockStore) writeBlock(rawBlock []byte) (blockLocation, error) {
 	_, _ = hasher.Write(scratch[:])
 
 	// Serialized block.
-	if err := s.writeData(rawBlock[:], "block"); err != nil {
+	if err := s.writeData(rawBlock, "block"); err != nil {
 		return blockLocation{}, err
 	}
 	_, _ = hasher.Write(rawBlock)
@@ -744,7 +744,7 @@ func scanBlockFiles(dbPath string) (int, uint32) {
 // and offset set and all fields initialized.
 func newBlockStore(basePath string, network wire.CurrencyNet) *blockStore {
 	// Look for the end of the latest block to file to determine what the
-	// write cursor position is from the viewpoing of the block files on
+	// write cursor position is from the viewpoint of the block files on
 	// disk.
 	fileNum, fileOff := scanBlockFiles(basePath)
 	if fileNum == -1 {

@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2017 The btcsuite developers
-// Copyright (c) 2015-2018 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package txscript
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -36,9 +37,9 @@ func TestOpcodeDisabled(t *testing.T) {
 		OP_LSHIFT, OP_RSHIFT,
 	}
 	for _, opcodeVal := range tests {
-		pop := parsedOpcode{opcode: &opcodeArray[opcodeVal], data: nil}
-		err := opcodeDisabled(&pop, nil)
-		if !IsErrorCode(err, ErrDisabledOpcode) {
+		op := &opcodeArray[opcodeVal]
+		err := opcodeDisabled(op, nil, nil)
+		if !errors.Is(err, ErrDisabledOpcode) {
 			t.Errorf("opcodeDisabled: unexpected error - got %v, "+
 				"want %v", err, ErrDisabledOpcode)
 			continue
@@ -139,11 +140,12 @@ func TestOpcodeDisasm(t *testing.T) {
 
 		// OP_UNKNOWN#.
 		case opcodeVal >= 0xc1 && opcodeVal <= 0xf8 || opcodeVal == 0xfc:
-			expectedStr = "OP_UNKNOWN" + strconv.Itoa(int(opcodeVal))
+			expectedStr = "OP_UNKNOWN" + strconv.Itoa(opcodeVal)
 		}
 
-		pop := parsedOpcode{opcode: &opcodeArray[opcodeVal], data: data}
-		gotStr := pop.print(true)
+		var buf strings.Builder
+		disasmOpcode(&buf, &opcodeArray[opcodeVal], data, true)
+		gotStr := buf.String()
 		if gotStr != expectedStr {
 			t.Errorf("pop.print (opcode %x): Unexpected disasm "+
 				"string - got %v, want %v", opcodeVal, gotStr,
@@ -205,11 +207,12 @@ func TestOpcodeDisasm(t *testing.T) {
 
 		// OP_UNKNOWN#.
 		case opcodeVal >= 0xc1 && opcodeVal <= 0xf8 || opcodeVal == 0xfc:
-			expectedStr = "OP_UNKNOWN" + strconv.Itoa(int(opcodeVal))
+			expectedStr = "OP_UNKNOWN" + strconv.Itoa(opcodeVal)
 		}
 
-		pop := parsedOpcode{opcode: &opcodeArray[opcodeVal], data: data}
-		gotStr := pop.print(false)
+		var buf strings.Builder
+		disasmOpcode(&buf, &opcodeArray[opcodeVal], data, false)
+		gotStr := buf.String()
 		if gotStr != expectedStr {
 			t.Errorf("pop.print (opcode %x): Unexpected disasm "+
 				"string - got %v, want %v", opcodeVal, gotStr,

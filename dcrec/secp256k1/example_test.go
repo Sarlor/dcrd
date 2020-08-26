@@ -1,96 +1,33 @@
 // Copyright (c) 2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package secp256k1_test
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 
-	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/dcrec/secp256k1"
+	"github.com/decred/dcrd/dcrec/secp256k1/v3"
 )
 
-// This example demonstrates signing a message with a secp256k1 private key that
-// is first parsed form raw bytes and serializing the generated signature.
-func Example_signMessage() {
-	// Decode a hex-encoded private key.
-	pkBytes, err := hex.DecodeString("22a47fa09a223f2aa079edf85a7c2d4f87" +
-		"20ee63e502ee2869afab7de234b80c")
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	privKey, pubKey := secp256k1.PrivKeyFromBytes(pkBytes)
-
-	// Sign a message using the private key.
-	message := "test message"
-	messageHash := chainhash.HashB([]byte(message))
-	signature, err := privKey.Sign(messageHash)
-	if err != nil {
-		fmt.Println(err)
-		return
+// This example demonstrates use of GenerateSharedSecret to encrypt a message
+// for a recipient's public key, and subsequently decrypt the message using the
+// recipient's private key.
+func Example_encryptDecryptMessage() {
+	newAEAD := func(key []byte) (cipher.AEAD, error) {
+		block, err := aes.NewCipher(key)
+		if err != nil {
+			return nil, err
+		}
+		return cipher.NewGCM(block)
 	}
 
-	// Serialize and display the signature.
-	fmt.Printf("Serialized Signature: %x\n", signature.Serialize())
-
-	// Verify the signature for the message using the public key.
-	verified := signature.Verify(messageHash, pubKey)
-	fmt.Printf("Signature Verified? %v\n", verified)
-
-	// Output:
-	// Serialized Signature: 3045022100fcc0a8768cfbcefcf2cadd7cfb0fb18ed08dd2e2ae84bef1a474a3d351b26f0302200fc1a350b45f46fa00101391302818d748c2b22615511a3ffd5bb638bd777207
-	// Signature Verified? true
-}
-
-// This example demonstrates verifying a secp256k1 signature against a public
-// key that is first parsed from raw bytes.  The signature is also parsed from
-// raw bytes.
-func Example_verifySignature() {
-	// Decode hex-encoded serialized public key.
-	pubKeyBytes, err := hex.DecodeString("02a673638cb9587cb68ea08dbef685c" +
-		"6f2d2a751a8b3c6f2a7e9a4999e6e4bfaf5")
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	pubKey, err := secp256k1.ParsePubKey(pubKeyBytes)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	// Decode hex-encoded serialized signature.
-	sigBytes, err := hex.DecodeString("3045022100fcc0a8768cfbcefcf2cadd7cfb0" +
-		"fb18ed08dd2e2ae84bef1a474a3d351b26f0302200fc1a350b45f46fa0010139130" +
-		"2818d748c2b22615511a3ffd5bb638bd777207")
-
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	signature, err := secp256k1.ParseDERSignature(sigBytes)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	// Verify the signature for the message using the public key.
-	message := "test message"
-	messageHash := chainhash.HashB([]byte(message))
-	verified := signature.Verify(messageHash, pubKey)
-	fmt.Println("Signature Verified?", verified)
-
-	// Output:
-	// Signature Verified? true
-}
-
-// This example demonstrates encrypting a message for a public key that is first
-// parsed from raw bytes, then decrypting it using the corresponding private key.
-func Example_encryptMessage() {
 	// Decode the hex-encoded pubkey of the recipient.
 	pubKeyBytes, err := hex.DecodeString("04115c42e757b2efb7671c578530ec191a1" +
 		"359381e6a71127a9d37c486fd30dae57e76dc58f693bd7e7010358ce6b165e483a29" +
@@ -105,13 +42,41 @@ func Example_encryptMessage() {
 		return
 	}
 
-	// Encrypt a message decryptable by the private key corresponding to pubKey
-	message := "test message"
-	ciphertext, err := secp256k1.Encrypt(pubKey, []byte(message))
+	// Derive an ephemeral public/private keypair for performing ECDHE with
+	// the recipient.
+	ephemeralPrivKey, err := secp256k1.GeneratePrivateKey()
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
+	ephemeralPubKey := ephemeralPrivKey.PubKey().SerializeCompressed()
+
+	// Using ECDHE, derive a shared symmetric key for encryption of the plaintext.
+	cipherKey := sha256.Sum256(secp256k1.GenerateSharedSecret(ephemeralPrivKey, pubKey))
+
+	// Seal the message using an AEAD.  Here we use AES-256-GCM.
+	// The ephemeral public key must be included in this message, and becomes
+	// the authenticated data for the AEAD.
+	//
+	// Note that unless a unique nonce can be guaranteed, the ephemeral
+	// and/or shared keys must not be reused to encrypt different messages.
+	// Doing so destroys the security of the scheme.  Random nonces may be
+	// used if XChaCha20-Poly1305 is used instead, but the message must then
+	// also encode the nonce (which we don't do here).
+	plaintext := []byte("test message")
+	aead, err := newAEAD(cipherKey[:])
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	nonce := make([]byte, aead.NonceSize())
+	ciphertext := make([]byte, 4+len(ephemeralPubKey))
+	binary.LittleEndian.PutUint32(ciphertext, uint32(len(ephemeralPubKey)))
+	copy(ciphertext[4:], ephemeralPubKey)
+	ciphertext = aead.Seal(ciphertext, nonce, plaintext, ephemeralPubKey)
+
+	// The remainder of this example is performed by the recipient on the
+	// ciphertext shared by the sender.
 
 	// Decode the hex-encoded private key.
 	pkBytes, err := hex.DecodeString("a11b0a4e1a132305652ee7a8eb7848f6ad" +
@@ -120,53 +85,37 @@ func Example_encryptMessage() {
 		fmt.Println(err)
 		return
 	}
-	// note that we already have corresponding pubKey
-	privKey, _ := secp256k1.PrivKeyFromBytes(pkBytes)
+	privKey := secp256k1.PrivKeyFromBytes(pkBytes)
 
-	// Try decrypting and verify if it's the same message.
-	plaintext, err := secp256k1.Decrypt(privKey, ciphertext)
+	// Read the sender's ephemeral public key from the start of the message.
+	// Error handling for inappropriate pubkey lengths is elided here for
+	// brevity.
+	pubKeyLen := binary.LittleEndian.Uint32(ciphertext[:4])
+	senderPubKeyBytes := ciphertext[4 : 4+pubKeyLen]
+	senderPubKey, err := secp256k1.ParsePubKey(senderPubKeyBytes)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	fmt.Println(string(plaintext))
+	// Derive the key used to seal the message, this time from the
+	// recipient's private key and the sender's public key.
+	recoveredCipherKey := sha256.Sum256(secp256k1.GenerateSharedSecret(privKey, senderPubKey))
 
-	// Output:
-	// test message
-}
-
-// This example demonstrates decrypting a message using a private key that is
-// first parsed from raw bytes.
-func Example_decryptMessage() {
-	// Decode the hex-encoded private key.
-	pkBytes, err := hex.DecodeString("a11b0a4e1a132305652ee7a8eb7848f6ad" +
-		"5ea381e3ce20a2c086a2e388230811")
+	// Open the sealed message.
+	aead, err = newAEAD(recoveredCipherKey[:])
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	nonce = make([]byte, aead.NonceSize())
+	recoveredPlaintext, err := aead.Open(nil, nonce, ciphertext[4+pubKeyLen:], senderPubKeyBytes)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	privKey, _ := secp256k1.PrivKeyFromBytes(pkBytes)
-
-	ciphertext, err := hex.DecodeString("35f644fbfb208bc71e57684c3c8b437402ca" +
-		"002047a2f1b38aa1a8f1d5121778378414f708fe13ebf7b4a7bb74407288c1958969" +
-		"00207cf4ac6057406e40f79961c973309a892732ae7a74ee96cd89823913b8b8d650" +
-		"a44166dc61ea1c419d47077b748a9c06b8d57af72deb2819d98a9d503efc59fc8307" +
-		"d14174f8b83354fac3ff56075162")
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	// Try decrypting the message.
-	plaintext, err := secp256k1.Decrypt(privKey, ciphertext)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	fmt.Println(string(plaintext))
+	fmt.Println(string(recoveredPlaintext))
 
 	// Output:
 	// test message

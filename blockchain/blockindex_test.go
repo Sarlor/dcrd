@@ -1,16 +1,17 @@
-// Copyright (c) 2018 The Decred developers
+// Copyright (c) 2018-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package blockchain
 
 import (
+	"math/rand"
 	"reflect"
 	"testing"
 	"time"
 
-	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/chaincfg/v3"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -32,7 +33,7 @@ func mustParseHash(s string) *chainhash.Hash {
 func TestBlockNodeHeader(t *testing.T) {
 	// Create a fake chain and block header with all fields set to nondefault
 	// values.
-	params := &chaincfg.RegNetParams
+	params := chaincfg.RegNetParams()
 	bc := newFakeChain(params)
 	tip := bc.bestChain.Tip()
 	testHeader := wire.BlockHeader{
@@ -154,10 +155,9 @@ func TestCalcPastMedianTime(t *testing.T) {
 	// data.  Also, clone the provided parameters first to avoid mutating them.
 	//
 	// The timestamp corresponds to 2018-01-01 00:00:00 +0000 UTC.
-	params := cloneParams(&chaincfg.RegNetParams)
+	params := chaincfg.RegNetParams()
 	params.GenesisBlock.Header.Timestamp = time.Unix(1514764800, 0)
-	genesisHash := params.GenesisBlock.BlockHash()
-	params.GenesisHash = &genesisHash
+	params.GenesisHash = params.GenesisBlock.BlockHash()
 
 	for _, test := range tests {
 		// Create a synthetic chain with the correct number of nodes and the
@@ -184,7 +184,7 @@ func TestCalcPastMedianTime(t *testing.T) {
 // TestChainTips ensures the chain tip tracking in the block index works
 // as expected.
 func TestChainTips(t *testing.T) {
-	params := &chaincfg.RegNetParams
+	params := chaincfg.RegNetParams()
 	bc := newFakeChain(params)
 	genesis := bc.bestChain.NodeByHeight(0)
 
@@ -194,14 +194,18 @@ func TestChainTips(t *testing.T) {
 	//  |    |     \-> 3b -> 4b -> 5b
 	//  |    \-> 2c -> 3c -> 4c -> 5c -> 6c -> 7c -> ... -> 26c
 	//  \-> 1d
-	//  \-> 1e
-	branches := make([][]*blockNode, 6)
+	//  |     \
+	//  \-> 1e |
+	//         \-> 2f (added after 1e)
+
+	branches := make([][]*blockNode, 7)
 	branches[0] = chainedFakeNodes(genesis, 4)
 	branches[1] = chainedFakeNodes(branches[0][0], 25)
 	branches[2] = chainedFakeNodes(branches[1][0], 3)
 	branches[3] = chainedFakeNodes(branches[0][0], 25)
 	branches[4] = chainedFakeNodes(genesis, 1)
 	branches[5] = chainedFakeNodes(genesis, 1)
+	branches[6] = chainedFakeNodes(branches[4][0], 1)
 
 	// Add all of the nodes to the index.
 	for _, branch := range branches {
@@ -213,16 +217,26 @@ func TestChainTips(t *testing.T) {
 	// Create a map of all of the chain tips the block index believes exist.
 	chainTips := make(map[*blockNode]struct{})
 	bc.index.RLock()
-	for _, nodes := range bc.index.chainTips {
-		for _, node := range nodes {
+	for _, entry := range bc.index.chainTips {
+		chainTips[entry.tip] = struct{}{}
+		for _, node := range entry.otherTips {
 			chainTips[node] = struct{}{}
 		}
 	}
 	bc.index.RUnlock()
 
-	// The expected chain tips are the tips of all of the branches.
+	// Exclude tips that are part of an earlier set of branch nodes that was
+	// built on via a new set of branch nodes.
+	excludeExpected := make(map[*blockNode]struct{})
+	excludeExpected[branchTip(branches[4])] = struct{}{}
+
+	// The expected chain tips are the tips of all of the branches minus any
+	// that were excluded.
 	expectedTips := make(map[*blockNode]struct{})
 	for _, branch := range branches {
+		if _, ok := excludeExpected[branchTip(branch)]; ok {
+			continue
+		}
 		expectedTips[branchTip(branch)] = struct{}{}
 	}
 
@@ -235,6 +249,64 @@ func TestChainTips(t *testing.T) {
 		if _, ok := chainTips[node]; !ok {
 			t.Fatalf("block index does not contain expected tip %s (height %d)",
 				node.hash, node.height)
+		}
+	}
+}
+
+// TestAncestorSkipList ensures the skip list functionality and ancestor
+// traversal that makes use of it works as expected.
+func TestAncestorSkipList(t *testing.T) {
+	// Create fake nodes to use for skip list traversal.
+	nodes := chainedFakeSkipListNodes(nil, 250000)
+
+	// Ensure the skip list is constructed correctly by checking that each node
+	// points to an ancestor with a lower height and that said ancestor is
+	// actually the node at that height.
+	for i, node := range nodes[1:] {
+		ancestorHeight := node.skipToAncestor.height
+		if ancestorHeight >= int64(i+1) {
+			t.Fatalf("height for skip list pointer %d is not lower than "+
+				"current node height %d", ancestorHeight, int64(i+1))
+		}
+
+		if node.skipToAncestor != nodes[ancestorHeight] {
+			t.Fatalf("unxpected node for skip list pointer for height %d",
+				ancestorHeight)
+		}
+	}
+
+	// Use a unique random seed each test instance and log it if the tests fail.
+	seed := time.Now().Unix()
+	rng := rand.New(rand.NewSource(seed))
+	defer func(t *testing.T, seed int64) {
+		if t.Failed() {
+			t.Logf("random seed: %d", seed)
+		}
+	}(t, seed)
+
+	for i := 0; i < 2500; i++ {
+		// Ensure obtaining the ancestor at a random starting height from the
+		// tip is the expected node.
+		startHeight := rng.Int63n(int64(len(nodes) - 1))
+		startNode := nodes[startHeight]
+		if branchTip(nodes).Ancestor(startHeight) != startNode {
+			t.Fatalf("unxpected ancestor for height %d from tip",
+				startHeight)
+		}
+
+		// Ensure obtaining the ancestor at height 0 starting from the node at
+		// the random starting height is the expected node.
+		if startNode.Ancestor(0) != nodes[0] {
+			t.Fatalf("unxpected ancestor for height 0 from start height %d",
+				startHeight)
+		}
+
+		// Ensure obtaining the ancestor from a random ending height starting
+		// from the node at the random starting height is the expected node.
+		endHeight := rng.Int63n(startHeight + 1)
+		if startNode.Ancestor(endHeight) != nodes[endHeight] {
+			t.Fatalf("unxpected ancestor for height %d from start height %d",
+				endHeight, startHeight)
 		}
 	}
 }

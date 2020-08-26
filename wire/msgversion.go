@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -19,7 +19,7 @@ import (
 const MaxUserAgentLen = 256
 
 // DefaultUserAgent for wire in the stack
-const DefaultUserAgent = "/dcrwire:0.3.0/"
+const DefaultUserAgent = "/dcrwire:0.4.0/"
 
 // MsgVersion implements the Message interface and represents a Decred version
 // message.  It is used for a peer to advertise itself as soon as an outbound
@@ -48,7 +48,7 @@ type MsgVersion struct {
 	// connections.
 	Nonce uint64
 
-	// The user agent that generated messsage.  This is a encoded as a varString
+	// The user agent that generated message.  This is encoded as a varString
 	// on the wire.  This has a max length of MaxUserAgentLen.
 	UserAgent string
 
@@ -79,10 +79,10 @@ func (msg *MsgVersion) AddService(service ServiceFlag) {
 //
 // This is part of the Message interface implementation.
 func (msg *MsgVersion) BtcDecode(r io.Reader, pver uint32) error {
+	const op = "MsgVersion.BtcDecode"
 	buf, ok := r.(*bytes.Buffer)
 	if !ok {
-		return fmt.Errorf("in method MsgVersion.BtcDecode reader is not a " +
-			"*bytes.Buffer")
+		return messageError(op, ErrInvalidMsg, "reader is not a *bytes.Buffer")
 	}
 
 	err := readElements(buf, &msg.ProtocolVersion, &msg.Services,
@@ -200,8 +200,6 @@ func (msg *MsgVersion) Command() string {
 // MaxPayloadLength returns the maximum length the payload can be for the
 // receiver.  This is part of the Message interface implementation.
 func (msg *MsgVersion) MaxPayloadLength(pver uint32) uint32 {
-	// XXX: <= 106 different
-
 	// Protocol version 4 bytes + services 8 bytes + timestamp 8 bytes +
 	// remote and local net addresses + nonce 8 bytes + length of user
 	// agent (varInt) + max allowed useragent length + last block 4 bytes +
@@ -252,13 +250,21 @@ func NewMsgVersionFromConn(conn net.Conn, nonce uint64,
 	return NewMsgVersion(lna, rna, nonce, lastBlock), nil
 }
 
-// validateUserAgent checks userAgent length against MaxUserAgentLen
+// validateUserAgent ensures the provided user agent conforms to the results
+// imposed by the protocol.
 func validateUserAgent(userAgent string) error {
+	const op = "MsgVersion.validateUserAgent"
 	if len(userAgent) > MaxUserAgentLen {
-		str := fmt.Sprintf("user agent too long [len %v, max %v]",
+		msg := fmt.Sprintf("user agent too long [len %v, max %v]",
 			len(userAgent), MaxUserAgentLen)
-		return messageError("MsgVersion", str)
+		return messageError(op, ErrUserAgentTooLong, msg)
 	}
+
+	if !isStrictAscii(userAgent) {
+		msg := "user agent is not strict ASCII"
+		return messageError(op, ErrMalformedStrictString, msg)
+	}
+
 	return nil
 }
 

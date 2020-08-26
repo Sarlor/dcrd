@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2018 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,6 +8,7 @@ package wire
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"reflect"
@@ -180,22 +181,6 @@ func TestReadMessageWireErrors(t *testing.T) {
 	pver := ProtocolVersion
 	dcrnet := MainNet
 
-	// Ensure message errors are as expected with no function specified.
-	wantErr := "something bad happened"
-	testErr := MessageError{Description: wantErr}
-	if testErr.Error() != wantErr {
-		t.Errorf("MessageError: wrong error - got %v, want %v",
-			testErr.Error(), wantErr)
-	}
-
-	// Ensure message errors are as expected with a function specified.
-	wantFunc := "foo"
-	testErr = MessageError{Func: wantFunc, Description: wantErr}
-	if testErr.Error() != wantFunc+": "+wantErr {
-		t.Errorf("MessageError: wrong error - got %v, want %v",
-			testErr.Error(), wantErr)
-	}
-
 	// Wire encoded bytes for main and testnet networks magic identifiers.
 	testNetBytes := makeHeader(TestNet3, "", 0, 0)
 
@@ -365,8 +350,9 @@ func TestReadMessageWireErrors(t *testing.T) {
 
 		// For errors which are not of type MessageError, check them for
 		// equality.
-		if _, ok := err.(*MessageError); !ok {
-			if err != test.readErr {
+		var merr *MessageError
+		if !errors.As(err, &merr) {
+			if !errors.Is(err, test.readErr) {
 				t.Errorf("ReadMessage #%d wrong error got: %v <%T>, "+
 					"want: %v <%T>", i, err, err,
 					test.readErr, test.readErr)
@@ -443,11 +429,11 @@ func TestWriteMessageWireErrors(t *testing.T) {
 
 		// For errors which are not of type MessageError, check them for
 		// equality.
-		if _, ok := err.(*MessageError); !ok {
-			if err != test.err {
+		var merr *MessageError
+		if !errors.As(err, &merr) {
+			if !errors.Is(err, test.err) {
 				t.Errorf("ReadMessage #%d wrong error got: %v <%T>, "+
-					"want: %v <%T>", i, err, err,
-					test.err, test.err)
+					"want: %v <%T>", i, err, err, test.err, test.err)
 				continue
 			}
 		}

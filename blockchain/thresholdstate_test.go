@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2018 The Decred developers
+// Copyright (c) 2017-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -10,9 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/decred/dcrd/blockchain/chaingen"
-	"github.com/decred/dcrd/chaincfg"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/blockchain/v3/chaingen"
+	"github.com/decred/dcrd/chaincfg/v3"
 )
 
 const (
@@ -118,7 +117,7 @@ func TestThresholdState(t *testing.T) {
 	// size to a really large number so that the test chain can be generated
 	// more quickly.
 	posVersion := uint32(4)
-	params := chaincfg.RegNetParams
+	params := chaincfg.RegNetParams()
 	params.WorkDiffWindowSize = 200000
 	params.WorkDiffWindows = 1
 	params.TargetTimespan = params.TargetTimePerBlock *
@@ -139,77 +138,9 @@ func TestThresholdState(t *testing.T) {
 			ExpireTime: math.MaxUint64,
 		})
 
-	// Create a test generator instance initialized with the genesis block
-	// as the tip.
-	g, err := chaingen.MakeGenerator(&params)
-	if err != nil {
-		t.Fatalf("Failed to create generator: %v", err)
-	}
-
-	// Create a new database and chain instance to run tests against.
-	chain, teardownFunc, err := chainSetup("thresholdstatetest", &params)
-	if err != nil {
-		t.Fatalf("Failed to setup chain instance: %v", err)
-	}
+	// Create a test harness initialized with the genesis block as the tip.
+	g, teardownFunc := newChaingenHarness(t, params, "thresholdstatetest")
 	defer teardownFunc()
-
-	// accepted processes the current tip block associated with the
-	// generator and expects it to be accepted to the main chain.
-	accepted := func() {
-		msgBlock := g.Tip()
-		blockHeight := msgBlock.Header.Height
-		block := dcrutil.NewBlock(msgBlock)
-		t.Logf("Testing block %s (hash %s, height %d)",
-			g.TipName(), block.Hash(), blockHeight)
-
-		forkLen, isOrphan, err := chain.ProcessBlock(block, BFNone)
-		if err != nil {
-			t.Fatalf("block %q (hash %s, height %d) should "+
-				"have been accepted: %v", g.TipName(),
-				block.Hash(), blockHeight, err)
-		}
-
-		// Ensure the main chain and orphan flags match the values
-		// specified in the test.
-		isMainChain := !isOrphan && forkLen == 0
-		if !isMainChain {
-			t.Fatalf("block %q (hash %s, height %d) unexpected main "+
-				"chain flag -- got %v, want true", g.TipName(),
-				block.Hash(), blockHeight, isMainChain)
-		}
-		if isOrphan {
-			t.Fatalf("block %q (hash %s, height %d) unexpected "+
-				"orphan flag -- got %v, want false", g.TipName(),
-				block.Hash(), blockHeight, isOrphan)
-		}
-	}
-
-	// testThresholdState queries the threshold state from the current
-	// tip block associated with the generator and expects the returned
-	// state and choice to match the provided values.
-	testThresholdState := func(id string, state ThresholdState, choice uint32) {
-		tipHash := g.Tip().BlockHash()
-		s, err := chain.NextThresholdState(&tipHash, posVersion, id)
-		if err != nil {
-			t.Fatalf("block %q (hash %s, height %d) unexpected "+
-				"error when retrieving threshold state: %v",
-				g.TipName(), tipHash, g.Tip().Header.Height,
-				err)
-		}
-
-		if s.State != state {
-			t.Fatalf("block %q (hash %s, height %d) unexpected "+
-				"threshold state for %s -- got %v, want %v",
-				g.TipName(), tipHash, g.Tip().Header.Height,
-				id, s.State, state)
-		}
-		if s.Choice != choice {
-			t.Fatalf("block %q (hash %s, height %d) unexpected "+
-				"choice for %s -- got %v, want %v",
-				g.TipName(), tipHash, g.Tip().Header.Height,
-				id, s.Choice, choice)
-		}
-	}
 
 	// Shorter versions of useful params for convenience.
 	ticketsPerBlock := int64(params.TicketsPerBlock)
@@ -224,33 +155,37 @@ func TestThresholdState(t *testing.T) {
 	ruleChangeDiv := int64(params.RuleChangeActivationDivisor)
 
 	// ---------------------------------------------------------------------
-	// Premine.
+	// Block One.
+	//
+	// NOTE: The advance funcs on the harness are intentionally not used in
+	// these tests since they need to manually test the threshold state at
+	// all key heights.
 	// ---------------------------------------------------------------------
 
-	// Add the required premine block.
+	// Add the required initial block.
 	//
-	//   genesis -> bp
-	g.CreatePremineBlock("bp", 0)
+	//   genesis -> bfb
+	g.CreateBlockOne("bfb", 0)
 	g.AssertTipHeight(1)
-	accepted()
-	testThresholdState(testDummy1ID, ThresholdDefined, invalidChoice)
-	testThresholdState(testDummy2ID, ThresholdDefined, invalidChoice)
+	g.AcceptTipBlock()
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdDefined, invalidChoice)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to have mature coinbase outputs to work with.
 	//
-	//   genesis -> bp -> bm0 -> bm1 -> ... -> bm#
+	//   genesis -> bfb -> bm0 -> bm1 -> ... -> bm#
 	// ---------------------------------------------------------------------
 
 	for i := uint16(0); i < coinbaseMaturity; i++ {
 		blockName := fmt.Sprintf("bm%d", i)
 		g.NextBlock(blockName, nil, nil)
 		g.SaveTipCoinbaseOuts()
-		accepted()
+		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(coinbaseMaturity) + 1)
-	testThresholdState(testDummy1ID, ThresholdDefined, invalidChoice)
-	testThresholdState(testDummy2ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdDefined, invalidChoice)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to reach the stake enabled height while
@@ -268,11 +203,11 @@ func TestThresholdState(t *testing.T) {
 		blockName := fmt.Sprintf("bse%d", i)
 		g.NextBlock(blockName, nil, ticketOuts)
 		g.SaveTipCoinbaseOuts()
-		accepted()
+		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(stakeEnabledHeight))
-	testThresholdState(testDummy1ID, ThresholdDefined, invalidChoice)
-	testThresholdState(testDummy2ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdDefined, invalidChoice)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to reach the stake validation height while
@@ -303,11 +238,11 @@ func TestThresholdState(t *testing.T) {
 		g.NextBlock(blockName, nil, ticketOuts,
 			chaingen.ReplaceBlockVersion(3))
 		g.SaveTipCoinbaseOuts()
-		accepted()
+		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(stakeValidationHeight))
-	testThresholdState(testDummy1ID, ThresholdDefined, invalidChoice)
-	testThresholdState(testDummy2ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdDefined, invalidChoice)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to reach one block before the next stake
@@ -315,7 +250,7 @@ func TestThresholdState(t *testing.T) {
 	// version 3.
 	//
 	// This will result in triggering enforcement of the stake version and
-	// that the stake version is 3.  The treshold state for the test dummy
+	// that the stake version is 3.  The threshold state for the test dummy
 	// deployments must still be defined since a v4 majority proof-of-work
 	// and proof-of-stake upgrade are required before moving to started.
 	// ---------------------------------------------------------------------
@@ -330,13 +265,13 @@ func TestThresholdState(t *testing.T) {
 			chaingen.ReplaceStakeVersion(0),
 			chaingen.ReplaceVoteVersions(3))
 		g.SaveTipCoinbaseOuts()
-		accepted()
+		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(stakeValidationHeight + stakeVerInterval - 1))
 	g.AssertBlockVersion(3)
 	g.AssertStakeVersion(0)
-	testThresholdState(testDummy1ID, ThresholdDefined, invalidChoice)
-	testThresholdState(testDummy2ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdDefined, invalidChoice)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to reach one block before the next rule change
@@ -358,13 +293,13 @@ func TestThresholdState(t *testing.T) {
 			chaingen.ReplaceStakeVersion(3),
 			chaingen.ReplaceVoteVersions(3))
 		g.SaveTipCoinbaseOuts()
-		accepted()
+		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(stakeValidationHeight + ruleChangeInterval - 2))
 	g.AssertBlockVersion(3)
 	g.AssertStakeVersion(3)
-	testThresholdState(testDummy1ID, ThresholdDefined, invalidChoice)
-	testThresholdState(testDummy2ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdDefined, invalidChoice)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to reach one block before the next stake
@@ -373,7 +308,7 @@ func TestThresholdState(t *testing.T) {
 	//
 	// This will result in achieving stake version 4 enforcement.
 	//
-	// The treshold state for the dummy deployments must still be defined
+	// The threshold state for the dummy deployments must still be defined
 	// since it can only change on a rule change boundary and it still
 	// requires a v4 majority proof-of-work upgrade before moving to
 	// started.
@@ -389,13 +324,13 @@ func TestThresholdState(t *testing.T) {
 			chaingen.ReplaceStakeVersion(3),
 			chaingen.ReplaceVoteVersions(4))
 		g.SaveTipCoinbaseOuts()
-		accepted()
+		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(stakeValidationHeight + stakeVerInterval*4 - 1))
 	g.AssertBlockVersion(3)
 	g.AssertStakeVersion(3)
-	testThresholdState(testDummy1ID, ThresholdDefined, invalidChoice)
-	testThresholdState(testDummy2ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdDefined, invalidChoice)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to reach the next rule change interval with
@@ -403,7 +338,7 @@ func TestThresholdState(t *testing.T) {
 	// the final two blocks to block version 4 so that majority version 4
 	// is not achieved, but the final block in the interval is version 4.
 	//
-	// The treshold state for the dummy deployments must still be defined
+	// The threshold state for the dummy deployments must still be defined
 	// since it still requires a v4 majority proof-of-work upgrade before
 	// moving to started.
 	// ---------------------------------------------------------------------
@@ -422,13 +357,13 @@ func TestThresholdState(t *testing.T) {
 			chaingen.ReplaceStakeVersion(4),
 			chaingen.ReplaceVoteVersions(4))
 		g.SaveTipCoinbaseOuts()
-		accepted()
+		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(stakeValidationHeight + ruleChangeInterval*2 - 1))
 	g.AssertBlockVersion(4)
 	g.AssertStakeVersion(4)
-	testThresholdState(testDummy1ID, ThresholdDefined, invalidChoice)
-	testThresholdState(testDummy2ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdDefined, invalidChoice)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to achieve proof-of-work block version lockin
@@ -440,7 +375,7 @@ func TestThresholdState(t *testing.T) {
 	// achieved and this will achieve v4 majority proof-of-work upgrade,
 	// voting can begin at the next rule change interval.
 	//
-	// The treshold state for the dummy deployments must still be defined
+	// The threshold state for the dummy deployments must still be defined
 	// since even though all required upgrade conditions are met, the state
 	// change must not happen until the start of the next rule change
 	// interval.
@@ -455,14 +390,14 @@ func TestThresholdState(t *testing.T) {
 			chaingen.ReplaceVotes(vbPrevBlockValid|vbTestDummy1Yes|
 				vbTestDummy2No, 4))
 		g.SaveTipCoinbaseOuts()
-		accepted()
+		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(stakeValidationHeight + ruleChangeInterval*2 -
 		1 + powNumToCheck))
 	g.AssertBlockVersion(4)
 	g.AssertStakeVersion(4)
-	testThresholdState(testDummy1ID, ThresholdDefined, invalidChoice)
-	testThresholdState(testDummy2ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdDefined, invalidChoice)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdDefined, invalidChoice)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to reach the next rule change interval with
@@ -470,7 +405,7 @@ func TestThresholdState(t *testing.T) {
 	// vote bits to include yes votes for the first test dummy agenda and
 	// no for the second test dummy agenda to ensure they aren't counted.
 	//
-	// The treshold state for the dummy deployments must move to started.
+	// The threshold state for the dummy deployments must move to started.
 	// Even though the majority of the votes have already been voting yes
 	// for the first test dummy agenda, and no for the second one, they must
 	// not count, otherwise it would move straight to lockedin or failed,
@@ -488,13 +423,13 @@ func TestThresholdState(t *testing.T) {
 			chaingen.ReplaceVotes(vbPrevBlockValid|vbTestDummy1Yes|
 				vbTestDummy2No, 4))
 		g.SaveTipCoinbaseOuts()
-		accepted()
+		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(stakeValidationHeight + ruleChangeInterval*3 - 1))
 	g.AssertBlockVersion(4)
 	g.AssertStakeVersion(4)
-	testThresholdState(testDummy1ID, ThresholdStarted, invalidChoice)
-	testThresholdState(testDummy2ID, ThresholdStarted, invalidChoice)
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdStarted, invalidChoice)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdStarted, invalidChoice)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to reach the next rule change interval with
@@ -502,7 +437,7 @@ func TestThresholdState(t *testing.T) {
 	// vote bits to include yes votes for the first test dummy agenda and
 	// no for the second test dummy agenda to ensure they aren't counted.
 	//
-	// The treshold state for the dummy deployments must remain in started
+	// The threshold state for the dummy deployments must remain in started
 	// because the votes are an old version and thus have a different
 	// definition and don't apply to version 4.
 	// ---------------------------------------------------------------------
@@ -518,13 +453,13 @@ func TestThresholdState(t *testing.T) {
 			chaingen.ReplaceVotes(vbPrevBlockValid|vbTestDummy1Yes|
 				vbTestDummy2No, 3))
 		g.SaveTipCoinbaseOuts()
-		accepted()
+		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(stakeValidationHeight + ruleChangeInterval*4 - 1))
 	g.AssertBlockVersion(4)
 	g.AssertStakeVersion(4)
-	testThresholdState(testDummy1ID, ThresholdStarted, invalidChoice)
-	testThresholdState(testDummy2ID, ThresholdStarted, invalidChoice)
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdStarted, invalidChoice)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdStarted, invalidChoice)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to reach the next rule change interval with
@@ -533,7 +468,7 @@ func TestThresholdState(t *testing.T) {
 	// votes for the first test dummy agenda and a majority no for the
 	// second test dummy agenda.
 	//
-	// The treshold state for the dummy deployments must remain in started
+	// The threshold state for the dummy deployments must remain in started
 	// because quorum was not reached.
 	// ---------------------------------------------------------------------
 
@@ -554,13 +489,13 @@ func TestThresholdState(t *testing.T) {
 			chaingen.ReplaceVotes(voteBits, 4))
 		totalVotes += ticketsPerBlock
 		g.SaveTipCoinbaseOuts()
-		accepted()
+		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(stakeValidationHeight + ruleChangeInterval*5 - 1))
 	g.AssertBlockVersion(4)
 	g.AssertStakeVersion(4)
-	testThresholdState(testDummy1ID, ThresholdStarted, invalidChoice)
-	testThresholdState(testDummy2ID, ThresholdStarted, invalidChoice)
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdStarted, invalidChoice)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdStarted, invalidChoice)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to reach the next rule change interval with
@@ -569,7 +504,7 @@ func TestThresholdState(t *testing.T) {
 	// majority yes for the first test dummy agenda and a few votes shy of a
 	// majority no for the second test dummy agenda.
 	//
-	// The treshold state for the dummy deployments must remain in started
+	// The threshold state for the dummy deployments must remain in started
 	// because even though quorum was reached, a required majority was not.
 	// ---------------------------------------------------------------------
 
@@ -596,15 +531,15 @@ func TestThresholdState(t *testing.T) {
 			chaingen.ReplaceBlockVersion(4),
 			chaingen.ReplaceStakeVersion(4),
 			chaingen.ReplaceVotes(voteBits, 4))
-		totalVotes += int64(ticketsPerBlock)
+		totalVotes += ticketsPerBlock
 		g.SaveTipCoinbaseOuts()
-		accepted()
+		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(stakeValidationHeight + ruleChangeInterval*6 - 1))
 	g.AssertBlockVersion(4)
 	g.AssertStakeVersion(4)
-	testThresholdState(testDummy1ID, ThresholdStarted, invalidChoice)
-	testThresholdState(testDummy2ID, ThresholdStarted, invalidChoice)
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdStarted, invalidChoice)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdStarted, invalidChoice)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to reach the next rule change interval with
@@ -612,7 +547,7 @@ func TestThresholdState(t *testing.T) {
 	// vote bits to yes for the first test dummy agenda and no to the second
 	// one.
 	//
-	// The treshold state for the first dummy deployment must move to
+	// The threshold state for the first dummy deployment must move to
 	// lockedin since a majority yes vote was achieved while the second
 	// dummy deployment must move to failed since a majority no vote was
 	// achieved.
@@ -629,13 +564,13 @@ func TestThresholdState(t *testing.T) {
 			chaingen.ReplaceVotes(vbPrevBlockValid|vbTestDummy1Yes|
 				vbTestDummy2No, 4))
 		g.SaveTipCoinbaseOuts()
-		accepted()
+		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(stakeValidationHeight + ruleChangeInterval*7 - 1))
 	g.AssertBlockVersion(4)
 	g.AssertStakeVersion(4)
-	testThresholdState(testDummy1ID, ThresholdLockedIn, testDummy1YesIndex)
-	testThresholdState(testDummy2ID, ThresholdFailed, testDummy2NoIndex)
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdLockedIn, testDummy1YesIndex)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdFailed, testDummy2NoIndex)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to reach the next rule change interval with
@@ -643,12 +578,12 @@ func TestThresholdState(t *testing.T) {
 	// vote bits to include no votes for the first test dummy agenda and
 	// yes votes for the second one.
 	//
-	// The treshold state for the first dummy deployment must move to active
-	// since even though the interval had a majority no votes, lockedin
-	// status has already been achieved and can't be undone without a new
-	// agenda.  Similarly, the second one must remain in failed even though
-	// the interval had a majority yes votes since a failed state can't be
-	// undone.
+	// The threshold state for the first dummy deployment must move to
+	// active since even though the interval had a majority no votes,
+	// lockedin status has already been achieved and can't be undone without
+	// a new agenda.  Similarly, the second one must remain in failed even
+	// though the interval had a majority yes votes since a failed state
+	// can't be undone.
 	// ---------------------------------------------------------------------
 
 	blocksNeeded = stakeValidationHeight + ruleChangeInterval*8 - 1 -
@@ -662,11 +597,11 @@ func TestThresholdState(t *testing.T) {
 			chaingen.ReplaceVotes(vbPrevBlockValid|vbTestDummy1No|
 				vbTestDummy2Yes, 4))
 		g.SaveTipCoinbaseOuts()
-		accepted()
+		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(stakeValidationHeight + ruleChangeInterval*8 - 1))
 	g.AssertBlockVersion(4)
 	g.AssertStakeVersion(4)
-	testThresholdState(testDummy1ID, ThresholdActive, testDummy1YesIndex)
-	testThresholdState(testDummy2ID, ThresholdFailed, testDummy2NoIndex)
+	g.TestThresholdStateChoice(testDummy1ID, ThresholdActive, testDummy1YesIndex)
+	g.TestThresholdStateChoice(testDummy2ID, ThresholdFailed, testDummy2NoIndex)
 }

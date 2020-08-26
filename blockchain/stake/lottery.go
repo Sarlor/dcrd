@@ -10,7 +10,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/decred/dcrd/blockchain/stake/internal/tickettreap"
+	"github.com/decred/dcrd/blockchain/stake/v3/internal/tickettreap"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 )
 
@@ -21,7 +21,7 @@ var (
 	seedConst = [8]byte{0x24, 0x3F, 0x6A, 0x88, 0x85, 0xA3, 0x08, 0xD3}
 )
 
-// Hash256PRNG is a determinstic pseudorandom number generator that uses a
+// Hash256PRNG is a deterministic pseudorandom number generator that uses a
 // 256-bit secure hashing function to generate random uint32s starting from
 // an initial seed.
 type Hash256PRNG struct {
@@ -176,11 +176,6 @@ func findTicketIdxs(size int, n uint16, prng *Hash256PRNG) ([]int, error) {
 	}
 
 	return list, nil
-}
-
-// FindTicketIdxs is the exported version of findTicketIdxs used for testing.
-func FindTicketIdxs(size int, n uint16, prng *Hash256PRNG) ([]int, error) {
-	return findTicketIdxs(size, n, prng)
 }
 
 // fetchWinners is a ticket database specific function which iterates over the

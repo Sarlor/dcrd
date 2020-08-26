@@ -197,7 +197,7 @@ func reflectTypeToJSONExample(xT descLookupFunc, rt reflect.Type, indentLevel in
 			// previous field to house the opening array bracket, so
 			// replace the opening object brace with the array
 			// syntax.  Also, replace the final closing object brace
-			// with the variadiac array closing syntax.
+			// with the variadic array closing syntax.
 			indent := strings.Repeat(" ", indentLevel)
 			if indentLevel == 0 {
 				results[0] = indent + "[{"
@@ -209,7 +209,7 @@ func reflectTypeToJSONExample(xT descLookupFunc, rt reflect.Type, indentLevel in
 			// the opening array bracket and object brace are
 			// already a part of the previous field.  However, the
 			// closing entry is a simple object brace, so replace it
-			// with the variadiac array closing syntax.  The final
+			// with the variadic array closing syntax.  The final
 			// tabs are necessary so the tab writer lines things up
 			// properly.
 			results[len(results)-1] = indent + "},...],\t\t"
@@ -270,7 +270,7 @@ func resultTypeHelp(xT descLookupFunc, rt reflect.Type, fieldDescKey string) str
 	w.Init(&formatted, 0, 4, 1, ' ', 0)
 	for i, text := range results {
 		if i == len(results)-1 {
-			fmt.Fprintf(w, text)
+			fmt.Fprint(w, text)
 		} else {
 			fmt.Fprintln(w, text)
 		}
@@ -503,7 +503,7 @@ func isValidResultType(kind reflect.Kind) bool {
 //   "help--condition1": "command specified"
 //   "help--result0":    "List of commands"
 //   "help--result1":    "Help for specified command"
-func GenerateHelp(method string, descs map[string]string, resultTypes ...interface{}) (string, error) {
+func GenerateHelp(method interface{}, descs map[string]string, resultTypes ...interface{}) (string, error) {
 	// Look up details about the provided method and error out if not
 	// registered.
 	registerLock.RLock()
@@ -511,7 +511,7 @@ func GenerateHelp(method string, descs map[string]string, resultTypes ...interfa
 	info := methodToInfo[method]
 	registerLock.RUnlock()
 	if !ok {
-		str := fmt.Sprintf("%q is not registered", method)
+		str := fmt.Sprintf("%#v is not registered", method)
 		return "", makeError(ErrUnregisteredMethod, str)
 	}
 
@@ -537,7 +537,7 @@ func GenerateHelp(method string, descs map[string]string, resultTypes ...interfa
 	}
 
 	// Create a closure for the description lookup function which falls back
-	// to the base help descritptions map for unrecognized keys and tracks
+	// to the base help descriptions map for unrecognized keys and tracks
 	// and missing keys.
 	var missingKey string
 	xT := func(key string) string {
@@ -553,7 +553,8 @@ func GenerateHelp(method string, descs map[string]string, resultTypes ...interfa
 	}
 
 	// Generate and return the help for the method.
-	help := methodHelp(xT, rtp, info.defaults, method, resultTypes)
+	methodStr := reflect.ValueOf(method).String()
+	help := methodHelp(xT, rtp, info.defaults, methodStr, resultTypes)
 	if missingKey != "" {
 		return help, makeError(ErrMissingDescription, missingKey)
 	}

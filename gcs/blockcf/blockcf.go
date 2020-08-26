@@ -1,6 +1,6 @@
 // Copyright (c) 2017 The btcsuite developers
 // Copyright (c) 2017 The Lightning Network Developers
-// Copyright (c) 2018 The Decred developers
+// Copyright (c) 2018-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -21,15 +21,17 @@ package blockcf
 import (
 	"encoding/binary"
 
-	"github.com/decred/dcrd/blockchain/stake"
+	"github.com/decred/dcrd/blockchain/stake/v3"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/gcs"
-	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/gcs/v2"
+	"github.com/decred/dcrd/txscript/v3"
 	"github.com/decred/dcrd/wire"
 )
 
-// P is the collision probability used for block committed filters (2^-20)
-const P = 20
+const (
+	// P is the collision probability used for block committed filters (2^-20)
+	P = 20
+)
 
 // Entries describes all of the filter entries used to create a GCS filter and
 // provides methods for appending data structures found in blocks.
@@ -62,10 +64,24 @@ func (e *Entries) AddStakePkScript(script []byte) {
 
 // AddSigScript adds any data pushes of a signature script to an entries slice.
 func (e *Entries) AddSigScript(script []byte) {
-	// Ignore errors and add pushed data, if any
-	pushes, err := txscript.PushedData(script)
-	if err == nil && len(pushes) != 0 {
-		*e = append(*e, pushes...)
+	const scriptVersion = 0
+
+	// Don't add anything if the script does not fully parse without error.
+	tokenizer := txscript.MakeScriptTokenizer(scriptVersion, script)
+	for tokenizer.Next() {
+		// Nothing to do.
+	}
+	if tokenizer.Err() != nil {
+		return
+	}
+
+	// Add any non-empty pushed data.
+	tokenizer = txscript.MakeScriptTokenizer(scriptVersion, script)
+	for tokenizer.Next() {
+		data := tokenizer.Data()
+		if len(data) != 0 {
+			*e = append(*e, data)
+		}
 	}
 }
 
@@ -81,7 +97,7 @@ func Key(hash *chainhash.Hash) [gcs.KeySize]byte {
 // contain all the previous regular outpoints spent within a block, as well as
 // the data pushes within all the outputs created within a block which can be
 // spent by regular transactions.
-func Regular(block *wire.MsgBlock) (*gcs.Filter, error) {
+func Regular(block *wire.MsgBlock) (*gcs.FilterV1, error) {
 	var data Entries
 
 	// Add "regular" data from stake transactions.  For each class of stake
@@ -149,14 +165,14 @@ func Regular(block *wire.MsgBlock) (*gcs.Filter, error) {
 	blockHash := block.BlockHash()
 	key := Key(&blockHash)
 
-	return gcs.NewFilter(P, key, data)
+	return gcs.NewFilterV1(P, key, data)
 }
 
 // Extended builds an extended GCS filter from a block.  An extended filter
 // supplements a regular basic filter by including all transaction hashes of
 // regular and stake transactions, and adding the witness data (a.k.a. the
 // signature script) found within every non-coinbase regular transaction.
-func Extended(block *wire.MsgBlock) (*gcs.Filter, error) {
+func Extended(block *wire.MsgBlock) (*gcs.FilterV1, error) {
 	var data Entries
 
 	// For each stake transaction, commit the transaction hash.  If the
@@ -193,5 +209,5 @@ func Extended(block *wire.MsgBlock) (*gcs.Filter, error) {
 	blockHash := block.BlockHash()
 	key := Key(&blockHash)
 
-	return gcs.NewFilter(P, key, data)
+	return gcs.NewFilterV1(P, key, data)
 }

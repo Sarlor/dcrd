@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -15,18 +15,17 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/btcsuite/goleveldb/leveldb"
-	"github.com/btcsuite/goleveldb/leveldb/comparer"
-	ldberrors "github.com/btcsuite/goleveldb/leveldb/errors"
-	"github.com/btcsuite/goleveldb/leveldb/filter"
-	"github.com/btcsuite/goleveldb/leveldb/iterator"
-	"github.com/btcsuite/goleveldb/leveldb/opt"
-	"github.com/btcsuite/goleveldb/leveldb/util"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/database/internal/treap"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/database/v2"
+	"github.com/decred/dcrd/database/v2/internal/treap"
 	"github.com/decred/dcrd/wire"
+	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/comparer"
+	ldberrors "github.com/syndtr/goleveldb/leveldb/errors"
+	"github.com/syndtr/goleveldb/leveldb/filter"
+	"github.com/syndtr/goleveldb/leveldb/iterator"
+	"github.com/syndtr/goleveldb/leveldb/opt"
+	"github.com/syndtr/goleveldb/leveldb/util"
 )
 
 const (
@@ -133,7 +132,7 @@ func makeDbErr(c database.ErrorCode, desc string, err error) database.Error {
 }
 
 // convertErr converts the passed leveldb error into a database error with an
-// equivalent error code  and the passed description.  It also sets the passed
+// equivalent error code and the passed description.  It also sets the passed
 // error as the underlying error.
 func convertErr(desc string, ldbErr error) database.Error {
 	// Use the driver-specific error code by default.  The code below will
@@ -1016,7 +1015,7 @@ func (tx *transaction) notifyActiveIters() {
 	tx.activeIterLock.RUnlock()
 }
 
-// checkClosed returns an error if the the database or transaction is closed.
+// checkClosed returns an error if the database or transaction is closed.
 func (tx *transaction) checkClosed() error {
 	// The transaction is no longer valid if it has been closed.
 	if tx.closed {
@@ -1087,11 +1086,11 @@ func (tx *transaction) fetchKey(key []byte) []byte {
 // NOTE: This function must only be called on a writable transaction.  Since it
 // is an internal helper function, it does not check.
 func (tx *transaction) deleteKey(key []byte, notifyIterators bool) {
-	// Remove the key from the list of pendings keys to be written on
+	// Remove the key from the list of pending keys to be written on
 	// transaction commit if needed.
 	tx.pendingKeys.Delete(key)
 
-	// Add the key to the list to be deleted on transaction	commit.
+	// Add the key to the list to be deleted on transaction commit.
 	tx.pendingRemove.Put(key, nil)
 
 	// Notify the active iterators about the change if the flag is set.
@@ -1147,7 +1146,7 @@ func (tx *transaction) hasBlock(hash *chainhash.Hash) bool {
 //   - ErrTxClosed if the transaction has already been closed
 //
 // This function is part of the database.Tx interface implementation.
-func (tx *transaction) StoreBlock(block *dcrutil.Block) error {
+func (tx *transaction) StoreBlock(block database.BlockSerializer) error {
 	// Ensure transaction state is valid.
 	if err := tx.checkClosed(); err != nil {
 		return err
@@ -1507,7 +1506,6 @@ func (tx *transaction) FetchBlockRegion(region *database.BlockRegion) ([]byte, e
 			"exceeds block length of %d", region.Hash,
 			region.Offset, region.Len, location.blockLen)
 		return nil, makeDbErr(database.ErrBlockRegionInvalid, str, nil)
-
 	}
 
 	// Read the region from the appropriate disk block file.
@@ -2000,7 +1998,7 @@ func (db *db) Close() error {
 	return closeErr
 }
 
-// filesExists reports whether the named file or directory exists.
+// fileExists reports whether the named file or directory exists.
 func fileExists(name string) bool {
 	if _, err := os.Stat(name); err != nil {
 		if os.IsNotExist(err) {

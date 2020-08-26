@@ -1,11 +1,12 @@
 // Copyright (c) 2016 The btcsuite developers
-// Copyright (c) 2017-2018 The Decred developers
+// Copyright (c) 2017-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package rpctest
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -16,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/dcrutil"
-	"github.com/decred/dcrd/rpcclient"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/dcrutil/v3"
+	"github.com/decred/dcrd/rpcclient/v6"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -34,6 +35,9 @@ const (
 )
 
 var (
+	// XXX these variables are accessed in what should be accessor
+	// functions yet it is all global
+
 	// current number of active test nodes.
 	numTestInstances = 0
 
@@ -65,7 +69,7 @@ const (
 
 // HarnessTestCase represents a test-case which utilizes an instance of the
 // Harness to exercise functionality.
-type HarnessTestCase func(r *Harness, t *testing.T)
+type HarnessTestCase func(ctx context.Context, r *Harness, t *testing.T)
 
 // Harness fully encapsulates an active dcrd process to provide a unified
 // platform for creating rpc driven integration tests involving dcrd. The
@@ -91,6 +95,8 @@ type Harness struct {
 	maxConnRetries int
 	nodeNum        int
 
+	t *testing.T
+
 	sync.Mutex
 }
 
@@ -100,7 +106,7 @@ type Harness struct {
 // used.
 //
 // NOTE: This function is safe for concurrent access.
-func New(activeNet *chaincfg.Params, handlers *rpcclient.NotificationHandlers, extraArgs []string) (*Harness, error) {
+func New(t *testing.T, activeNet *chaincfg.Params, handlers *rpcclient.NotificationHandlers, extraArgs []string) (*Harness, error) {
 	harnessStateMtx.Lock()
 	defer harnessStateMtx.Unlock()
 
@@ -125,6 +131,7 @@ func New(activeNet *chaincfg.Params, handlers *rpcclient.NotificationHandlers, e
 	if err != nil {
 		return nil, err
 	}
+	debugf(t, "temp dir: %v\n", nodeTestData)
 
 	certFile := filepath.Join(nodeTestData, "rpc.cert")
 	keyFile := filepath.Join(nodeTestData, "rpc.key")
@@ -132,7 +139,7 @@ func New(activeNet *chaincfg.Params, handlers *rpcclient.NotificationHandlers, e
 		return nil, err
 	}
 
-	wallet, err := newMemWallet(activeNet, uint32(numTestInstances))
+	wallet, err := newMemWallet(t, activeNet, uint32(numTestInstances))
 	if err != nil {
 		return nil, err
 	}
@@ -145,17 +152,16 @@ func New(activeNet *chaincfg.Params, handlers *rpcclient.NotificationHandlers, e
 		return nil, err
 	}
 
+	// Uncomment and change to enable additional dcrd debug/trace output.
+	//config.debugLevel = "TXMP=trace,TRSY=trace,RPCS=trace,PEER=trace"
+
 	// Generate p2p+rpc listening addresses.
 	config.listen, config.rpcListen = generateListeningAddresses()
 
 	// Create the testing node bounded to the simnet.
-	node, err := newNode(config, nodeTestData)
-	if err != nil {
-		return nil, err
-	}
-
+	node := newNode(t, config, nodeTestData)
 	nodeNum := numTestInstances
-	numTestInstances++
+	numTestInstances++ // XXX this really should be the length of the harness map.
 
 	if handlers == nil {
 		handlers = &rpcclient.NotificationHandlers{}
@@ -193,6 +199,7 @@ func New(activeNet *chaincfg.Params, handlers *rpcclient.NotificationHandlers, e
 		ActiveNet:      activeNet,
 		nodeNum:        nodeNum,
 		wallet:         wallet,
+		t:              t,
 	}
 
 	// Track this newly created test instance within the package level
@@ -218,29 +225,32 @@ func (h *Harness) SetUp(createTestChain bool, numMatureOutputs uint32) error {
 	if err := h.connectRPCClient(); err != nil {
 		return err
 	}
-
+	ctx := context.Background()
 	h.wallet.Start()
 
 	// Filter transactions that pay to the coinbase associated with the
 	// wallet.
 	filterAddrs := []dcrutil.Address{h.wallet.coinbaseAddr}
-	if err := h.Node.LoadTxFilter(true, filterAddrs, nil); err != nil {
+	if err := h.Node.LoadTxFilter(ctx, true, filterAddrs, nil); err != nil {
 		return err
 	}
 
 	// Ensure dcrd properly dispatches our registered call-back for each new
 	// block. Otherwise, the memWallet won't function properly.
-	if err := h.Node.NotifyBlocks(); err != nil {
+	if err := h.Node.NotifyBlocks(ctx); err != nil {
 		return err
 	}
 
+	tracef(h.t, "createTestChain %v numMatureOutputs %v", createTestChain,
+		numMatureOutputs)
 	// Create a test chain with the desired number of mature coinbase
 	// outputs.
 	if createTestChain && numMatureOutputs != 0 {
 		// Include an extra block to account for the premine block.
 		numToGenerate := (uint32(h.ActiveNet.CoinbaseMaturity) +
 			numMatureOutputs) + 1
-		_, err := h.Node.Generate(numToGenerate)
+		tracef(h.t, "Generate: %v", numToGenerate)
+		_, err := h.Node.Generate(ctx, numToGenerate)
 		if err != nil {
 			return err
 		}
@@ -248,10 +258,11 @@ func (h *Harness) SetUp(createTestChain bool, numMatureOutputs uint32) error {
 
 	// Block until the wallet has fully synced up to the tip of the main
 	// chain.
-	_, height, err := h.Node.GetBestBlock()
+	_, height, err := h.Node.GetBestBlock(ctx)
 	if err != nil {
 		return err
 	}
+	tracef(h.t, "Best block height: %v", height)
 	ticker := time.NewTicker(time.Millisecond * 100)
 	for range ticker.C {
 		walletHeight := h.wallet.SyncedHeight()
@@ -259,6 +270,7 @@ func (h *Harness) SetUp(createTestChain bool, numMatureOutputs uint32) error {
 			break
 		}
 	}
+	tracef(h.t, "Synced: %v", height)
 
 	return nil
 }
@@ -269,18 +281,26 @@ func (h *Harness) SetUp(createTestChain bool, numMatureOutputs uint32) error {
 // NOTE: This method and SetUp should always be called from the same goroutine
 // as they are not concurrent safe.
 func (h *Harness) TearDown() error {
+	tracef(h.t, "TearDown %p %p", h.Node, h.node)
+	defer tracef(h.t, "TearDown done")
+
 	if h.Node != nil {
+		tracef(h.t, "TearDown: Node")
 		h.Node.Shutdown()
 	}
 
+	tracef(h.t, "TearDown: node")
 	if err := h.node.shutdown(); err != nil {
 		return err
 	}
 
-	if err := os.RemoveAll(h.testNodeDir); err != nil {
-		return err
+	if !(debug || trace) {
+		if err := os.RemoveAll(h.testNodeDir); err != nil {
+			return err
+		}
 	}
 
+	tracef(h.t, "TearDown deleting %v", h.node.pid)
 	delete(testInstances, h.testNodeDir)
 
 	return nil
@@ -354,7 +374,7 @@ func (h *Harness) CreateTransaction(targetOutputs []*wire.TxOut, feeRate dcrutil
 }
 
 // UnlockOutputs unlocks any outputs which were previously marked as
-// unspendabe due to being selected to fund a transaction via the
+// unspendable due to being selected to fund a transaction via the
 // CreateTransaction method.
 //
 // This function is safe for concurrent access.

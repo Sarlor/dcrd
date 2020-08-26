@@ -33,6 +33,10 @@ const FileContents = `[Application Options]
 ; Use simnet.
 ; simnet=1
 
+; Change how long to wait for TCP connection completion.  Valid time units are
+; {s, m, h}.  Minimum 1 second".
+; dialtimeout=30s
+
 ; Connect via a SOCKS5 proxy.  NOTE: Specifying a proxy will disable listening
 ; for incoming connections unless listen addresses are provided via the 'listen'
 ; option.
@@ -41,7 +45,7 @@ const FileContents = `[Application Options]
 ; proxypass=
 
 ; The SOCKS5 proxy above is assumed to be Tor (https://www.torproject.org).
-; If the proxy  is not tor the the following my be used to prevent using
+; If the proxy is not tor, the following may be used to prevent using
 ; tor specific SOCKS queries to lookup addresses (this increases anonymity when
 ; tor is used by preventing your IP being leaked via DNS).
 ; noonion=1
@@ -60,7 +64,7 @@ const FileContents = `[Application Options]
 
 ; Use Universal Plug and Play (UPnP) to automatically open the listen port
 ; and obtain the external IP address from supported devices.  NOTE: This option
-; will have no effect if exernal IP addresses are specified.
+; will have no effect if external IP addresses are specified.
 ; upnp=1
 
 ; Specify the external IP addresses your node is listening on.  One address per
@@ -224,6 +228,12 @@ const FileContents = `[Application Options]
 ; server without having to remove credentials from the config file.
 ; norpc=1
 
+; Specify the curve to use when generating TLS keypairs for the rpc endpoint.
+; Note that after changing this the rpccert/rpckey files need to be deleted so
+; that they are recreated with the new curve.
+;
+; Supported curves: P-521, P-256.
+; tlscurve=P-521
 
 
 ; ------------------------------------------------------------------------------
@@ -240,8 +250,8 @@ const FileContents = `[Application Options]
 ; Require high priority for relaying free or low-fee transactions.
 ; norelaypriority=0
 
-; Limit orphan transaction pool to 1000 transactions.
-; maxorphantx=1000
+; Limit orphan transaction pool to 100 transactions.
+; maxorphantx=100
 
 ; Do not accept transactions from remote peers.
 ; blocksonly=1
@@ -321,6 +331,15 @@ const FileContents = `[Application Options]
 ; by the blockmaxsize option and will be limited as needed.
 ; blockprioritysize=20000
 
+; Allow block templates to be generated even when the chain is not considered
+; synced and there are no connections to other nodes on networks other than the
+; main network.  Specifying this option with the main network will result in a
+; configuration parse error.  This option is automatically enabled when the
+; simulation network is active.
+;
+; NOTE: This is an advanced option and should not be used unless you understand
+; exactly why it exists and what it implications it carries.
+; allowunsyncedmining=0
 
 ; ------------------------------------------------------------------------------
 ; Debug
@@ -349,4 +368,46 @@ const FileContents = `[Application Options]
 ;   profile=192.168.1.123:6061
 ; Listen on ipv6 loopback interface:
 ;   profile=[::1]:6061
+`
+
+// DcrctlSampleConfig is a string containing the commented example config for dcrctl.
+const DcrctlSampleConfig = `[Application Options]
+
+; ------------------------------------------------------------------------------
+; Network settings
+; ------------------------------------------------------------------------------
+
+; Use testnet (cannot be used with simnet=1).
+; testnet=1
+
+; Use simnet (cannot be used with testnet=1).
+; simnet=1
+
+; The duration of inactivity before a peer is timed out.
+; Valid time units are {s,m,h}. Minimum 15 seconds.
+; peeridletimeout=120s
+
+
+; ------------------------------------------------------------------------------
+; RPC client settings
+; ------------------------------------------------------------------------------
+
+; Connect via a SOCKS5 proxy.
+; proxy=127.0.0.1:9050
+; proxyuser=
+; proxypass=
+
+; Username and password to authenticate connections to a Decred RPC server
+; (usually dcrd or dcrwallet)
+; rpcuser=
+; rpcpass=
+
+; RPC server to connect to
+; rpcserver=localhost
+
+; Wallet RPC server to connect to
+; walletrpcserver=localhost
+
+; RPC server certificate chain file for validation
+; rpccert=~/.dcrd/rpc.cert
 `

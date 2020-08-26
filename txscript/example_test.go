@@ -1,5 +1,5 @@
 // Copyright (c) 2014-2016 The btcsuite developers
-// Copyright (c) 2015-2018 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -9,13 +9,12 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/decred/dcrd/chaincfg"
-	"github.com/decred/dcrd/chaincfg/chainec"
 	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/chaincfg/v3"
 	"github.com/decred/dcrd/dcrec"
-	"github.com/decred/dcrd/dcrec/secp256k1"
-	"github.com/decred/dcrd/dcrutil"
-	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/dcrec/secp256k1/v3"
+	"github.com/decred/dcrd/dcrutil/v3"
+	"github.com/decred/dcrd/txscript/v3"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -27,8 +26,9 @@ func ExamplePayToAddrScript() {
 	// which is useful to ensure the accuracy of the address and determine
 	// the address type.  It is also required for the upcoming call to
 	// PayToAddrScript.
+	mainNetParams := chaincfg.MainNetParams()
 	addressStr := "DsSej1qR3Fyc8kV176DCh9n9cY9nqf9Quxk"
-	address, err := dcrutil.DecodeAddress(addressStr)
+	address, err := dcrutil.DecodeAddress(addressStr, mainNetParams)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -58,6 +58,7 @@ func ExamplePayToAddrScript() {
 // script.
 func ExampleExtractPkScriptAddrs() {
 	// Start with a standard pay-to-pubkey-hash script.
+	const scriptVersion = 0
 	scriptHex := "76a914128004ff2fcaf13b2b91eb654b1dc2b674f7ec6188ac"
 	script, err := hex.DecodeString(scriptHex)
 	if err != nil {
@@ -66,8 +67,9 @@ func ExampleExtractPkScriptAddrs() {
 	}
 
 	// Extract and print details from the script.
+	mainNetParams := chaincfg.MainNetParams()
 	scriptClass, addresses, reqSigs, err := txscript.ExtractPkScriptAddrs(
-		txscript.DefaultScriptVersion, script, &chaincfg.MainNetParams)
+		scriptVersion, script, mainNetParams)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -92,10 +94,12 @@ func ExampleSignTxOutput() {
 		fmt.Println(err)
 		return
 	}
-	privKey, pubKey := secp256k1.PrivKeyFromBytes(privKeyBytes)
+	pubKey := secp256k1.PrivKeyFromBytes(privKeyBytes).PubKey()
 	pubKeyHash := dcrutil.Hash160(pubKey.SerializeCompressed())
-	addr, err := dcrutil.NewAddressPubKeyHash(pubKeyHash,
-		&chaincfg.MainNetParams, dcrec.STEcdsaSecp256k1)
+	mainNetParams := chaincfg.MainNetParams()
+	sigType := dcrec.STEcdsaSecp256k1
+	addr, err := dcrutil.NewAddressPubKeyHash(pubKeyHash, mainNetParams,
+		sigType)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -133,7 +137,7 @@ func ExampleSignTxOutput() {
 	redeemTx.AddTxOut(txOut)
 
 	// Sign the redeeming transaction.
-	lookupKey := func(a dcrutil.Address) (chainec.PrivateKey, bool, error) {
+	lookupKey := func(a dcrutil.Address) ([]byte, dcrec.SignatureType, bool, error) {
 		// Ordinarily this function would involve looking up the private
 		// key for the provided address, but since the only thing being
 		// signed in this example uses the address associated with the
@@ -149,15 +153,14 @@ func ExampleSignTxOutput() {
 		//
 		// privKey.D.SetInt64(12345)
 		//
-		return privKey, true, nil
+		return privKeyBytes, sigType, true, nil
 	}
 	// Notice that the script database parameter is nil here since it isn't
 	// used.  It must be specified when pay-to-script-hash transactions are
 	// being signed.
-	sigScript, err := txscript.SignTxOutput(&chaincfg.MainNetParams,
-		redeemTx, 0, originTx.TxOut[0].PkScript, txscript.SigHashAll,
-		txscript.KeyClosure(lookupKey), nil, nil,
-		dcrec.STEcdsaSecp256k1)
+	sigScript, err := txscript.SignTxOutput(mainNetParams, redeemTx, 0,
+		originTx.TxOut[0].PkScript, txscript.SigHashAll,
+		txscript.KeyClosure(lookupKey), nil, nil)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -182,4 +185,35 @@ func ExampleSignTxOutput() {
 
 	// Output:
 	// Transaction successfully signed
+}
+
+// This example demonstrates creating a script tokenizer instance and using it
+// to count the number of opcodes a script contains.
+func ExampleScriptTokenizer() {
+	// Create a script to use in the example.  Ordinarily this would come from
+	// some other source.
+	hash160 := dcrutil.Hash160([]byte("example"))
+	script, err := txscript.NewScriptBuilder().AddOp(txscript.OP_DUP).
+		AddOp(txscript.OP_HASH160).AddData(hash160).
+		AddOp(txscript.OP_EQUALVERIFY).AddOp(txscript.OP_CHECKSIG).Script()
+	if err != nil {
+		fmt.Printf("failed to build script: %v\n", err)
+		return
+	}
+
+	// Create a tokenizer to iterate the script and count the number of opcodes.
+	const scriptVersion = 0
+	var numOpcodes int
+	tokenizer := txscript.MakeScriptTokenizer(scriptVersion, script)
+	for tokenizer.Next() {
+		numOpcodes++
+	}
+	if tokenizer.Err() != nil {
+		fmt.Printf("script failed to parse: %v\n", err)
+	} else {
+		fmt.Printf("script contains %d opcode(s)\n", numOpcodes)
+	}
+
+	// Output:
+	// script contains 5 opcode(s)
 }

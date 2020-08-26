@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2018 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -10,10 +10,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/decred/dcrd/chaincfg"
-	"github.com/decred/dcrd/database"
-	_ "github.com/decred/dcrd/database/ffldb"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/database/v2"
+	_ "github.com/decred/dcrd/database/v2/ffldb"
+	"github.com/decred/dcrd/dcrutil/v3"
 	flags "github.com/jessevdk/go-flags"
 )
 
@@ -27,7 +27,7 @@ var (
 	dcrdHomeDir     = dcrutil.AppDataDir("dcrd", false)
 	defaultDataDir  = filepath.Join(dcrdHomeDir, "data")
 	knownDbTypes    = database.SupportedDrivers()
-	activeNetParams = &chaincfg.MainNetParams
+	activeNetParams = chaincfg.MainNetParams()
 )
 
 // config defines the configuration options for findcheckpoint.
@@ -45,7 +45,7 @@ type config struct {
 	Progress          int    `short:"p" long:"progress" description:"Show a progress message each time this number of seconds have passed -- Use 0 to disable progress announcements"`
 }
 
-// filesExists reports whether the named file or directory exists.
+// fileExists reports whether the named file or directory exists.
 func fileExists(name string) bool {
 	if _, err := os.Stat(name); err != nil {
 		if os.IsNotExist(err) {
@@ -93,11 +93,11 @@ func loadConfig() (*config, []string, error) {
 	// while we're at it
 	if cfg.TestNet {
 		numNets++
-		activeNetParams = &chaincfg.TestNet3Params
+		activeNetParams = chaincfg.TestNet3Params()
 	}
 	if cfg.SimNet {
 		numNets++
-		activeNetParams = &chaincfg.SimNetParams
+		activeNetParams = chaincfg.SimNetParams()
 	}
 	if numNets > 1 {
 		str := "%s: the testnet, regtest, and simnet params can't be " +

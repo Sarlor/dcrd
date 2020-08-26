@@ -1,5 +1,5 @@
 // Copyright (c) 2016 The btcsuite developers
-// Copyright (c) 2017-2018 The Decred developers
+// Copyright (c) 2017-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,9 +8,8 @@ package blockchain
 import (
 	"fmt"
 
-	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/wire"
+	"github.com/decred/dcrd/chaincfg/v3"
 )
 
 // ThresholdState define the various threshold states used when voting on
@@ -189,7 +188,7 @@ func (c *thresholdStateCache) Update(hash chainhash.Hash, state ThresholdStateTu
 	c.entries[hash] = state
 }
 
-// MarkFlushed marks all of the current udpates as flushed to the database.
+// MarkFlushed marks all of the current updates as flushed to the database.
 // This is useful so the caller can ensure the needed database updates are not
 // lost until they have successfully been written to the database.
 func (c *thresholdStateCache) MarkFlushed() {
@@ -517,8 +516,9 @@ func (b *BlockChain) stateLastChanged(version uint32, node *blockNode, checker t
 }
 
 // StateLastChangedHeight returns the height at which the provided consensus
-// deployment agenda last changed state.  Note that, unlike the ThresholdState
-// function, this function returns the information as of the passed block hash.
+// deployment agenda last changed state.  Note that, unlike the
+// NextThresholdState function, this function returns the information as of the
+// passed block hash.
 //
 // This function is safe for concurrent access.
 func (b *BlockChain) StateLastChangedHeight(hash *chainhash.Hash, version uint32, deploymentID string) (int64, error) {
@@ -528,11 +528,11 @@ func (b *BlockChain) StateLastChangedHeight(hash *chainhash.Hash, version uint32
 	// available, but there is not currently any tracking to be able to
 	// efficiently determine that state.
 	node := b.index.LookupNode(hash)
-	if node == nil || !b.index.NodeStatus(node).KnownValid() {
+	if node == nil || !b.index.NodeStatus(node).HasValidated() {
 		return 0, HashError(hash.String())
 	}
 
-	// Fetch the treshold state cache for the provided deployment id as well as
+	// Fetch the threshold state cache for the provided deployment id as well as
 	// the condition checker.
 	var cache *thresholdStateCache
 	var checker thresholdConditionChecker
@@ -578,7 +578,7 @@ func (b *BlockChain) NextThresholdState(hash *chainhash.Hash, version uint32, de
 	// available, but there is not currently any tracking to be able to
 	// efficiently determine that state.
 	node := b.index.LookupNode(hash)
-	if node == nil || !b.index.NodeStatus(node).KnownValid() {
+	if node == nil || !b.index.NodeStatus(node).HasValidated() {
 		invalidState := ThresholdStateTuple{
 			State:  ThresholdInvalid,
 			Choice: invalidChoice,
@@ -603,22 +603,16 @@ func (b *BlockChain) NextThresholdState(hash *chainhash.Hash, version uint32, de
 //
 // This function MUST be called with the chain state lock held (for writes).
 func (b *BlockChain) isLNFeaturesAgendaActive(prevNode *blockNode) (bool, error) {
-	// Consensus voting on LN features is only enabled on mainnet, testnet
-	// v2 (removed from code), and regnet.
-	net := b.chainParams.Net
-	if net != wire.MainNet && net != wire.RegNet {
+	// Determine the correct deployment version for the LN features consensus
+	// vote as defined in DCP0002 and DCP0003 or treat it as active when voting
+	// is not enabled for the current network.
+	const deploymentID = chaincfg.VoteIDLNFeatures
+	deploymentVer, ok := b.deploymentVers[deploymentID]
+	if !ok {
 		return true, nil
 	}
 
-	// Determine the version for the LN features agenda as defined in
-	// DCP0002 and DCP0003 for the provided network.
-	deploymentVer := uint32(5)
-	if b.chainParams.Net != wire.MainNet {
-		deploymentVer = 6
-	}
-
-	state, err := b.deploymentState(prevNode, deploymentVer,
-		chaincfg.VoteIDLNFeatures)
+	state, err := b.deploymentState(prevNode, deploymentVer, deploymentID)
 	if err != nil {
 		return false, err
 	}
@@ -627,7 +621,6 @@ func (b *BlockChain) isLNFeaturesAgendaActive(prevNode *blockNode) (bool, error)
 	// here because there is only one possible choice that can be active for
 	// the agenda, which is yes, so there is no need to check it.
 	return state.State == ThresholdActive, nil
-
 }
 
 // IsLNFeaturesAgendaActive returns whether or not the LN features agenda vote,
@@ -638,6 +631,102 @@ func (b *BlockChain) isLNFeaturesAgendaActive(prevNode *blockNode) (bool, error)
 func (b *BlockChain) IsLNFeaturesAgendaActive() (bool, error) {
 	b.chainLock.Lock()
 	isActive, err := b.isLNFeaturesAgendaActive(b.bestChain.Tip())
+	b.chainLock.Unlock()
+	return isActive, err
+}
+
+// isFixSeqLocksAgendaActive returns whether or not the fix sequence locks
+// agenda vote, as defined in DCP0004 has passed and is now active from the
+// point of view of the passed block node.
+//
+// It is important to note that, as the variable name indicates, this function
+// expects the block node prior to the block for which the deployment state is
+// desired.  In other words, the returned deployment state is for the block
+// AFTER the passed node.
+//
+// This function MUST be called with the chain state lock held (for writes).
+func (b *BlockChain) isFixSeqLocksAgendaActive(prevNode *blockNode) (bool, error) {
+	// Determine the correct deployment version for the fix sequence locks
+	// consensus vote as defined in DCP0004 or treat it as active when voting
+	// is not enabled for the current network.
+	const deploymentID = chaincfg.VoteIDFixLNSeqLocks
+	deploymentVer, ok := b.deploymentVers[deploymentID]
+	if !ok {
+		return true, nil
+	}
+
+	state, err := b.deploymentState(prevNode, deploymentVer, deploymentID)
+	if err != nil {
+		return false, err
+	}
+
+	// NOTE: The choice field of the return threshold state is not examined
+	// here because there is only one possible choice that can be active for
+	// the agenda, which is yes, so there is no need to check it.
+	return state.State == ThresholdActive, nil
+}
+
+// IsFixSeqLocksAgendaActive returns whether or not the fix sequence locks
+// agenda vote, as defined in DCP0004 has passed and is now active for the
+// block AFTER the current best chain block.
+//
+// This function is safe for concurrent access.
+func (b *BlockChain) IsFixSeqLocksAgendaActive() (bool, error) {
+	b.chainLock.Lock()
+	isActive, err := b.isFixSeqLocksAgendaActive(b.bestChain.Tip())
+	b.chainLock.Unlock()
+	return isActive, err
+}
+
+// isHeaderCommitmentsAgendaActive returns whether or not the header commitments
+// agenda vote, as defined in DCP0005 has passed and is now active from the
+// point of view of the passed block node.
+//
+// It is important to note that, as the variable name indicates, this function
+// expects the block node prior to the block for which the deployment state is
+// desired.  In other words, the returned deployment state is for the block
+// AFTER the passed node.
+//
+// This function MUST be called with the chain state lock held (for writes).
+func (b *BlockChain) isHeaderCommitmentsAgendaActive(prevNode *blockNode) (bool, error) {
+	// Determine the correct deployment version for the header commitments
+	// consensus vote as defined in DCP0005 or treat it as active when voting
+	// is not enabled for the current network.
+	const deploymentID = chaincfg.VoteIDHeaderCommitments
+	deploymentVer, ok := b.deploymentVers[deploymentID]
+	if !ok {
+		return true, nil
+	}
+
+	state, err := b.deploymentState(prevNode, deploymentVer, deploymentID)
+	if err != nil {
+		return false, err
+	}
+
+	// NOTE: The choice field of the return threshold state is not examined
+	// here because there is only one possible choice that can be active for
+	// the agenda, which is yes, so there is no need to check it.
+	return state.State == ThresholdActive, nil
+}
+
+// IsHeaderCommitmentsAgendaActive returns whether or not the header commitments
+// agenda vote, as defined in DCP0005 has passed and is now active for the block
+// AFTER the given block.
+//
+// This function is safe for concurrent access.
+func (b *BlockChain) IsHeaderCommitmentsAgendaActive(prevHash *chainhash.Hash) (bool, error) {
+	// NOTE: The requirement for the node being fully validated here is strictly
+	// stronger than what is actually required.  In reality, all that is needed
+	// is for the block data for the node and all of its ancestors to be
+	// available, but there is not currently any tracking to be able to
+	// efficiently determine that state.
+	node := b.index.LookupNode(prevHash)
+	if node == nil || !b.index.NodeStatus(node).HasValidated() {
+		return false, HashError(prevHash.String())
+	}
+
+	b.chainLock.Lock()
+	isActive, err := b.isHeaderCommitmentsAgendaActive(node)
 	b.chainLock.Unlock()
 	return isActive, err
 }
