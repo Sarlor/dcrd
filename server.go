@@ -462,7 +462,7 @@ type server struct {
 	broadcast            chan broadcastMsg
 	peerHeightsUpdate    chan updatePeerHeightsMsg
 	wg                   sync.WaitGroup
-	nat                  NAT
+	nat                  *upnpNAT
 	db                   database.DB
 	timeSource           blockchain.MedianTimeSource
 	services             wire.ServiceFlag
@@ -2938,7 +2938,7 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 	amgr := addrmgr.New(cfg.DataDir, dcrdLookup)
 
 	var listeners []net.Listener
-	var nat NAT
+	var nat *upnpNAT
 	if !cfg.DisableListen {
 		var err error
 		listeners, nat, err = initListeners(ctx, chainParams, amgr, listenAddrs, services)
@@ -3267,31 +3267,22 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 			return nil, errors.New("no usable rpc listen addresses")
 		}
 
-		s.rpcServer, err = rpcserver.New(&rpcserver.Config{
-			Listeners:       rpcListeners,
-			ConnMgr:         &rpcConnManager{&s},
-			SyncMgr:         &rpcSyncMgr{server: &s, blockMgr: s.blockManager},
-			ExistsAddresser: newRPCExistsAddresser(s.existsAddrIndex),
-			FeeEstimator:    &rpcFeeEstimator{s.feeEstimator},
-			TimeSource:      s.timeSource,
-			Services:        s.services,
-			AddrManager:     &rpcAddrManager{s.addrManager},
-			Clock:           &rpcClock{},
-			SubsidyCache:    s.subsidyCache,
-			Chain:           &rpcChain{s.chain},
-			ChainParams:     chainParams,
-			SanityChecker:   &rpcSanityChecker{s.timeSource, chainParams},
-			DB:              db,
-			TxMempooler:     &rpcTxMempooler{s.txMemPool},
-			BlockTemplater: func() rpcserver.BlockTemplater {
-				if s.bg == nil {
-					return nil
-				}
-				return &rpcBlockTemplater{s.bg}
-			}(),
+		rpcsConfig := rpcserver.Config{
+			Listeners:            rpcListeners,
+			ConnMgr:              &rpcConnManager{&s},
+			SyncMgr:              &rpcSyncMgr{server: &s, blockMgr: s.blockManager},
+			FeeEstimator:         s.feeEstimator,
+			TimeSource:           s.timeSource,
+			Services:             s.services,
+			AddrManager:          s.addrManager,
+			Clock:                &rpcClock{},
+			SubsidyCache:         s.subsidyCache,
+			Chain:                &rpcChain{s.chain},
+			ChainParams:          chainParams,
+			SanityChecker:        &rpcSanityChecker{s.timeSource, chainParams},
+			DB:                   db,
+			TxMempooler:          s.txMemPool,
 			CPUMiner:             &rpcCPUMiner{s.cpuMiner},
-			TxIndex:              s.txIndex,
-			AddrIndex:            s.addrIndex,
 			NetInfo:              cfg.generateNetworkInfo(),
 			MinRelayTxFee:        cfg.minRelayTxFee,
 			Proxy:                cfg.Proxy,
@@ -3308,14 +3299,25 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 			MaxProtocolVersion:   maxProtocolVersion,
 			UserAgentVersion:     userAgentVersion,
 			LogManager:           &rpcLogManager{},
-			Filterer: func() rpcserver.Filterer {
-				if s.cfIndex == nil {
-					return nil
-				}
-				return &rpcFilterer{s.cfIndex}
-			}(),
-			FiltererV2: &rpcFiltererV2{s.chain},
-		})
+			FiltererV2:           s.chain,
+		}
+		if s.existsAddrIndex != nil {
+			rpcsConfig.ExistsAddresser = s.existsAddrIndex
+		}
+		if s.bg != nil {
+			rpcsConfig.BlockTemplater = &rpcBlockTemplater{s.bg}
+		}
+		if s.txIndex != nil {
+			rpcsConfig.TxIndexer = s.txIndex
+		}
+		if s.addrIndex != nil {
+			rpcsConfig.AddrIndexer = s.addrIndex
+		}
+		if s.cfIndex != nil {
+			rpcsConfig.Filterer = s.cfIndex
+		}
+
+		s.rpcServer, err = rpcserver.New(&rpcsConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -3333,7 +3335,7 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 // initListeners initializes the configured net listeners and adds any bound
 // addresses to the address manager. Returns the listeners and a NAT interface,
 // which is non-nil if UPnP is in use.
-func initListeners(ctx context.Context, params *chaincfg.Params, amgr *addrmgr.AddrManager, listenAddrs []string, services wire.ServiceFlag) ([]net.Listener, NAT, error) {
+func initListeners(ctx context.Context, params *chaincfg.Params, amgr *addrmgr.AddrManager, listenAddrs []string, services wire.ServiceFlag) ([]net.Listener, *upnpNAT, error) {
 	// Listen for TCP connections at the configured addresses
 	netAddrs, err := parseListeners(listenAddrs)
 	if err != nil {
@@ -3351,7 +3353,7 @@ func initListeners(ctx context.Context, params *chaincfg.Params, amgr *addrmgr.A
 		listeners = append(listeners, listener)
 	}
 
-	var nat NAT
+	var nat *upnpNAT
 	if len(cfg.ExternalIPs) != 0 {
 		defaultPort, err := strconv.ParseUint(params.DefaultPort, 10, 16)
 		if err != nil {
@@ -3389,7 +3391,7 @@ func initListeners(ctx context.Context, params *chaincfg.Params, amgr *addrmgr.A
 	} else {
 		if cfg.Upnp {
 			var err error
-			nat, err = Discover(ctx)
+			nat, err = discover(ctx)
 			if err != nil {
 				srvrLog.Warnf("Can't discover upnp: %v", err)
 			}

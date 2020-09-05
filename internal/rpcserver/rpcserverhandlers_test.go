@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"math"
 	"math/big"
 	"net"
@@ -27,8 +28,10 @@ import (
 	"github.com/decred/dcrd/blockchain/stake/v3"
 	"github.com/decred/dcrd/blockchain/standalone/v2"
 	"github.com/decred/dcrd/blockchain/v3"
+	"github.com/decred/dcrd/blockchain/v3/indexers"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/database/v2"
 	"github.com/decred/dcrd/dcrjson/v3"
 	"github.com/decred/dcrd/dcrutil/v3"
 	"github.com/decred/dcrd/gcs/v2"
@@ -117,6 +120,7 @@ type testRPCChain struct {
 	blockHashByHeight               *chainhash.Hash
 	blockHashByHeightErr            error
 	blockHeightByHash               int64
+	blockHeightByHashErr            error
 	calcNextRequiredStakeDifficulty int64
 	calcWantHeight                  int64
 	chainTips                       []blockchain.ChainTipInfo
@@ -182,7 +186,7 @@ func (c *testRPCChain) BlockHashByHeight(height int64) (*chainhash.Hash, error) 
 
 // BlockHeightByHash returns a mocked height of the block with the given hash.
 func (c *testRPCChain) BlockHeightByHash(hash *chainhash.Hash) (int64, error) {
-	return c.blockHeightByHash, nil
+	return c.blockHeightByHash, c.blockHeightByHashErr
 }
 
 // CalcNextRequiredStakeDifficulty returns a mocked required stake difficulty.
@@ -510,6 +514,172 @@ func (e *testExistsAddresser) ExistsAddress(addr dcrutil.Address) (bool, error) 
 // address in a slice of addresses has been seen before.
 func (e *testExistsAddresser) ExistsAddresses(addrs []dcrutil.Address) ([]bool, error) {
 	return e.existsAddresses, e.existsAddressesErr
+}
+
+// testAddrIndexer provides a mock address indexer by implementing the
+// AddrIndexer interface.
+type testAddrIndexer struct {
+	entriesForAddress         []indexers.TxIndexEntry
+	entriesForAddressSkipped  uint32
+	entriesForAddressErr      error
+	unconfirmedTxnsForAddress []*dcrutil.Tx
+}
+
+// EntriesForAddress returns a mocked slice of indexers.TxIndexEntry that
+// involve the given address.
+func (a *testAddrIndexer) EntriesForAddress(dbTx database.Tx,
+	addr dcrutil.Address, numToSkip, numRequested uint32, reverse bool) (
+	[]indexers.TxIndexEntry, uint32, error) {
+	return a.entriesForAddress, a.entriesForAddressSkipped, a.entriesForAddressErr
+}
+
+// UnconfirmedTxnsForAddress returns a mocked slice of transactions that are
+// currently in the unconfirmed (memory-only) address index.
+func (a *testAddrIndexer) UnconfirmedTxnsForAddress(addr dcrutil.Address) []*dcrutil.Tx {
+	return a.unconfirmedTxnsForAddress
+}
+
+// testTxIndexer provides a mock transaction indexer by implementing the
+// TxIndexer interface.
+type testTxIndexer struct {
+	entry func(hash *chainhash.Hash) (*indexers.TxIndexEntry, error)
+}
+
+// Entry returns mocked details for the provided transaction hash from the
+// transaction index.
+func (t *testTxIndexer) Entry(hash *chainhash.Hash) (*indexers.TxIndexEntry, error) {
+	return t.entry(hash)
+}
+
+// testDB provides a mock database by implementing the database.DB interface.
+type testDB struct {
+	dbType   string
+	beginTx  database.Tx
+	beginErr error
+	viewTx   database.Tx
+	updateTx database.Tx
+	closeErr error
+}
+
+// Type returns the mocked database driver type.
+func (d *testDB) Type() string {
+	return d.dbType
+}
+
+// Begin returns a mocked database transaction.
+func (d *testDB) Begin(writable bool) (database.Tx, error) {
+	return d.beginTx, d.beginErr
+}
+
+// View invokes the passed function in the context of a mocked read-only
+// database transaction.
+func (d *testDB) View(fn func(tx database.Tx) error) error {
+	return fn(d.viewTx)
+}
+
+// Update invokes the passed function in the context of a mocked read-write
+// database transaction.
+func (d *testDB) Update(fn func(tx database.Tx) error) error {
+	return fn(d.updateTx)
+}
+
+// Close provides a mock implementation for the shut down of the database.
+func (d *testDB) Close() error {
+	return d.closeErr
+}
+
+// testDatabaseTx provides a mock database transaction by implementing the
+// database.Tx interface.
+type testDatabaseTx struct {
+	metadata             database.Bucket
+	storeBlockErr        error
+	hasBlock             bool
+	hasBlockErr          error
+	hasBlocks            []bool
+	hasBlocksErr         error
+	fetchBlockHeader     []byte
+	fetchBlockHeaderErr  error
+	fetchBlockHeaders    [][]byte
+	fetchBlockHeadersErr error
+	fetchBlock           []byte
+	fetchBlockErr        error
+	fetchBlocks          [][]byte
+	fetchBlocksErr       error
+	fetchBlockRegion     func(region *database.BlockRegion) ([]byte, error)
+	fetchBlockRegions    func(regions []database.BlockRegion) ([][]byte, error)
+	commitErr            error
+	rollbackErr          error
+}
+
+// Metadata returns a mocked top-most bucket for all metadata storage.
+func (t *testDatabaseTx) Metadata() database.Bucket {
+	return t.metadata
+}
+
+// StoreBlock provides a mock implementation for storing the provided block
+// in the database.
+func (t *testDatabaseTx) StoreBlock(block database.BlockSerializer) error {
+	return t.storeBlockErr
+}
+
+// HasBlock returns a mocked bool representing whether or not a block with the
+// given hash exists in the database.
+func (t *testDatabaseTx) HasBlock(hash *chainhash.Hash) (bool, error) {
+	return t.hasBlock, t.hasBlockErr
+}
+
+// HasBlocks returns a mocked slice of bools representing whether or not the
+// blocks with the provided hashes exist in the database.
+func (t *testDatabaseTx) HasBlocks(hashes []chainhash.Hash) ([]bool, error) {
+	return t.hasBlocks, t.hasBlocksErr
+}
+
+// FetchBlockHeader returns mocked raw serialized bytes for the block header
+// identified by the given hash.
+func (t *testDatabaseTx) FetchBlockHeader(hash *chainhash.Hash) ([]byte, error) {
+	return t.fetchBlockHeader, t.fetchBlockHeaderErr
+}
+
+// FetchBlockHeaders returns mocked raw serialized bytes for the block headers
+// identified by the given hashes.
+func (t *testDatabaseTx) FetchBlockHeaders(hashes []chainhash.Hash) ([][]byte, error) {
+	return t.fetchBlockHeaders, t.fetchBlockHeadersErr
+}
+
+// FetchBlock returns mocked raw serialized bytes for the block identified by
+// the given hash.
+func (t *testDatabaseTx) FetchBlock(hash *chainhash.Hash) ([]byte, error) {
+	return t.fetchBlock, t.fetchBlockErr
+}
+
+// FetchBlocks returns mocked raw serialized bytes for the blocks identified by
+// the given hashes.
+func (t *testDatabaseTx) FetchBlocks(hashes []chainhash.Hash) ([][]byte, error) {
+	return t.fetchBlocks, t.fetchBlocksErr
+}
+
+// FetchBlockRegion returns mocked raw serialized bytes for the given block
+// region.
+func (t *testDatabaseTx) FetchBlockRegion(region *database.BlockRegion) ([]byte, error) {
+	return t.fetchBlockRegion(region)
+}
+
+// FetchBlockRegions returns mocked raw serialized bytes for the given block
+// regions.
+func (t *testDatabaseTx) FetchBlockRegions(regions []database.BlockRegion) ([][]byte, error) {
+	return t.fetchBlockRegions(regions)
+}
+
+// Commit provides a mock implementation for committing all changes that have
+// been made.
+func (t *testDatabaseTx) Commit() error {
+	return t.commitErr
+}
+
+// Rollback provides a mock implementation for undoing all changes that have
+// been made.
+func (t *testDatabaseTx) Rollback() error {
+	return t.rollbackErr
 }
 
 // testConnManager provides a mock connection manager by implementing the
@@ -893,6 +1063,19 @@ func hexToBytes(s string) []byte {
 	return b
 }
 
+// hexToMsgTx converts the passed hex string into a wire.MsgTx and will panic if
+// there is an error.  This is only provided for hard-coded constants so errors
+// in the source code can be detected.  It will only (and must only) be called
+// with hard-coded values.
+func hexToMsgTx(s string) *wire.MsgTx {
+	var msgTx wire.MsgTx
+	err := msgTx.Deserialize(bytes.NewReader(hexToBytes(s)))
+	if err != nil {
+		panic("invalid tx hex in source file: " + s)
+	}
+	return &msgTx
+}
+
 // cloneParams returns a deep copy of the provided parameters so the caller is
 // free to modify them without worrying about interfering with other tests.
 func cloneParams(params *chaincfg.Params) *chaincfg.Params {
@@ -926,6 +1109,17 @@ var block432100 = func() wire.MsgBlock {
 	return block
 }()
 
+// hexFromFile loads a hex string from a file and will panic if there is an
+// error.  This is provided for test files that contain hard-coded data.
+func hexFromFile(filename string) string {
+	filePath := filepath.Join(testDataPath, filename)
+	hex, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		panic(err)
+	}
+	return string(hex)
+}
+
 type rpcTest struct {
 	name                  string
 	handler               commandHandler
@@ -942,12 +1136,18 @@ type rpcTest struct {
 	mockSyncManager       *testSyncManager
 	mockExistsAddresser   *testExistsAddresser
 	setExistsAddresserNil bool
+	mockAddrIndexer       *testAddrIndexer
+	setAddrIndexerNil     bool
+	mockTxIndexer         *testTxIndexer
+	setTxIndexerNil       bool
+	mockDB                *testDB
 	mockConnManager       *testConnManager
 	mockClock             *testClock
 	mockLogManager        *testLogManager
 	mockFilterer          *testFilterer
 	mockFiltererV2        *testFiltererV2
 	mockTxMempooler       *testTxMempooler
+	mockMiningAddrs       []dcrutil.Address
 	result                interface{}
 	wantErr               bool
 	errCode               dcrjson.RPCErrorCode
@@ -1158,6 +1358,44 @@ func defaultMockExistsAddresser() *testExistsAddresser {
 	return &testExistsAddresser{}
 }
 
+// defaultMockAddrIndexer provides a default mock address indexer to be
+// used throughout the tests. Tests can override these defaults by calling
+// defaultMockAddrIndexer, updating fields as necessary on the returned
+// *testAddrIndexer, and then setting rpcTest.mockAddrIndexer as that
+// *testAddrIndexer.
+func defaultMockAddrIndexer() *testAddrIndexer {
+	return &testAddrIndexer{}
+}
+
+// defaultMockTxIndexer provides a default mock transaction indexer to be
+// used throughout the tests. Tests can override these defaults by calling
+// defaultMockTxIndexer, updating fields as necessary on the returned
+// *testTxIndexer, and then setting rpcTest.mockTxIndexer as that
+// *testTxIndexer.
+func defaultMockTxIndexer() *testTxIndexer {
+	return &testTxIndexer{}
+}
+
+// defaultMockDB provides a default mock database to be used throughout the
+// tests. Tests can override these defaults by calling defaultMockDB, updating
+// fields as necessary on the returned *testDB, and then setting rpcTest.mockDB
+// as that *testDB.
+func defaultMockDB() *testDB {
+	defaultDatabaseTx := &testDatabaseTx{
+		fetchBlockRegion: func(region *database.BlockRegion) ([]byte, error) {
+			return nil, errors.New("block not found")
+		},
+		fetchBlockRegions: func(regions []database.BlockRegion) ([][]byte, error) {
+			return nil, errors.New("block not found")
+		},
+	}
+	return &testDB{
+		beginTx:  defaultDatabaseTx,
+		viewTx:   defaultDatabaseTx,
+		updateTx: defaultDatabaseTx,
+	}
+}
+
 // defaultMockSyncManager provides a default mock sync manager to be used
 // throughout the tests. Tests can override these defaults by calling
 // defaultMockSyncManager, updating fields as necessary on the returned
@@ -1280,7 +1518,9 @@ func defaultMockCPUMiner() *testCPUMiner {
 // *testTxMempooler, and then setting rpcTest.mockTxMempooler as that
 // *testTxMempooler.
 func defaultMockTxMempooler() *testTxMempooler {
-	return &testTxMempooler{}
+	return &testTxMempooler{
+		fetchTransactionErr: errors.New("transaction is not in the pool"),
+	}
 }
 
 // defaultMockConfig provides a default Config that is used throughout
@@ -1295,6 +1535,9 @@ func defaultMockConfig(chainParams *chaincfg.Params) *Config {
 		FeeEstimator:    defaultMockFeeEstimator(),
 		SyncMgr:         defaultMockSyncManager(),
 		ExistsAddresser: defaultMockExistsAddresser(),
+		AddrIndexer:     defaultMockAddrIndexer(),
+		TxIndexer:       defaultMockTxIndexer(),
+		DB:              defaultMockDB(),
 		ConnMgr:         defaultMockConnManager(),
 		CPUMiner:        defaultMockCPUMiner(),
 		TxMempooler:     defaultMockTxMempooler(),
@@ -2873,6 +3116,79 @@ func TestHandleExistsMissedTickets(t *testing.T) {
 	}})
 }
 
+func TestHandleGenerate(t *testing.T) {
+	t.Parallel()
+
+	hashStrOne := "00000000000000001e6ec1501c858506de1de4703d1be8bab4061126e8f61480"
+	hashStrTwo := "00000000000000001a1ec2becd0dd90bfbd0c65f42fdaf608dd9ceac2a3aee1d"
+	generatedBlocks := []*chainhash.Hash{mustParseHash(hashStrOne), mustParseHash(hashStrTwo)}
+	res := []string{hashStrOne, hashStrTwo}
+	miningAddr, err := dcrutil.DecodeAddress("DcurAwesomeAddressmqDctW5wJCW1Cn2MF", defaultChainParams)
+	if err != nil {
+		t.Fatalf("[DecodeAddress] unexpected error: %v", err)
+	}
+	miningAddrs := []dcrutil.Address{miningAddr}
+	chainParams := cloneParams(defaultChainParams)
+	chainParams.GenerateSupported = true
+	cpu := defaultMockCPUMiner()
+	cpu.generatedBlocks = generatedBlocks
+	testRPCServerHandler(t, []rpcTest{{
+		name:    "handleGenerate: ok",
+		handler: handleGenerate,
+		cmd: &types.GenerateCmd{
+			NumBlocks: 2,
+		},
+		mockMiningAddrs: miningAddrs,
+		mockChainParams: chainParams,
+		mockCPUMiner:    cpu,
+		result:          res,
+	}, {
+		name:    "handleGenerate: no mining addrs",
+		handler: handleGenerate,
+		cmd: &types.GenerateCmd{
+			NumBlocks: 2,
+		},
+		mockChainParams: chainParams,
+		mockCPUMiner:    cpu,
+		wantErr:         true,
+		errCode:         dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleGenerate: generate not supported for network",
+		handler: handleGenerate,
+		cmd: &types.GenerateCmd{
+			NumBlocks: 2,
+		},
+		mockMiningAddrs: miningAddrs,
+		mockCPUMiner:    cpu,
+		wantErr:         true,
+		errCode:         dcrjson.ErrRPCDifficulty,
+	}, {
+		name:            "handleGenerate: generate 0 blocks",
+		handler:         handleGenerate,
+		cmd:             &types.GenerateCmd{},
+		mockMiningAddrs: miningAddrs,
+		mockChainParams: chainParams,
+		mockCPUMiner:    cpu,
+		wantErr:         true,
+		errCode:         dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleGenerate: generate n blocks error",
+		handler: handleGenerate,
+		cmd: &types.GenerateCmd{
+			NumBlocks: 2,
+		},
+		mockMiningAddrs: miningAddrs,
+		mockChainParams: chainParams,
+		mockCPUMiner: func() *testCPUMiner {
+			cpu := defaultMockCPUMiner()
+			cpu.generateNBlocksErr = errors.New("")
+			return cpu
+		}(),
+		wantErr: true,
+		errCode: dcrjson.ErrRPCInternal.Code,
+	}})
+}
+
 func TestHandleGetAddedNodeInfo(t *testing.T) {
 	t.Parallel()
 
@@ -3878,8 +4194,8 @@ func TestHandleGetInfo(t *testing.T) {
 			Difficulty:      float64(28147398026.656624),
 			TestNet:         false,
 			RelayFee:        float64(0.0001),
-			AddrIndex:       false,
-			TxIndex:         false,
+			AddrIndex:       true,
+			TxIndex:         true,
 		},
 	}})
 }
@@ -4504,6 +4820,443 @@ func TestHandlePing(t *testing.T) {
 	}})
 }
 
+// testTx holds test transaction info and is used for mocking transaction
+// details for handleSearchRawTransactions.
+type testTx struct {
+	hex        string
+	indexEntry *indexers.TxIndexEntry
+	vinList    []testTx
+}
+
+// searchRawTransactionsResult returns a types.SearchRawTransactionsResult
+// for the given testTx and handleSearchRawTransactions parameters.  This uses
+// createVinListPrevOut and createVoutList, so ideally those should be tested
+// independently as well.
+func searchRawTransactionsResult(t *testing.T, s *Server, tx testTx,
+	vinExtra bool, filterAddr map[string]struct{},
+) types.SearchRawTransactionsResult {
+	msgTx := hexToMsgTx(tx.hex)
+	vinList, err := createVinListPrevOut(s, msgTx, defaultChainParams, vinExtra,
+		filterAddr)
+	if err != nil {
+		t.Fatalf("error creating vinList: %+v", err)
+	}
+	result := types.SearchRawTransactionsResult{
+		Hex:      tx.hex,
+		Txid:     msgTx.TxHash().String(),
+		Version:  int32(msgTx.Version),
+		LockTime: msgTx.LockTime,
+		Expiry:   msgTx.Expiry,
+		Vin:      vinList,
+		Vout:     createVoutList(msgTx, defaultChainParams, filterAddr),
+	}
+	if tx.indexEntry != nil {
+		result.BlockHash = tx.indexEntry.BlockRegion.Hash.String()
+		result.BlockHeight = int64(block432100.Header.Height)
+		result.BlockIndex = tx.indexEntry.BlockIndex
+		result.Confirmations = uint64(1)
+		result.Time = block432100.Header.Timestamp.Unix()
+		result.Blocktime = block432100.Header.Timestamp.Unix()
+	}
+	return result
+}
+
+func TestHandleSearchRawTransactions(t *testing.T) {
+	t.Parallel()
+
+	// Create a testTx that exists in a block.
+	tx0TestTx := testTx{
+		hex: hexFromFile("tx432098-11.hex"),
+		indexEntry: &indexers.TxIndexEntry{
+			BlockRegion: database.BlockRegion{
+				Hash: mustParseHash("00000000000000001fc4c4c7a3f2ec6d552dda16a3a928f27bd6" +
+					"bd16d8f1e9b3"),
+				Offset: 52508,
+				Len:    453,
+			},
+			BlockIndex: 11,
+		},
+	}
+	tx0TestTx.vinList = []testTx{{
+		hex: hexFromFile("tx431841-1.hex"),
+		indexEntry: &indexers.TxIndexEntry{
+			BlockRegion: database.BlockRegion{
+				Hash: mustParseHash("00000000000000000a5f89c78fd0136d6efb065f5a9b8e763df2" +
+					"62fcbb64a93c"),
+				Offset: 55568,
+				Len:    420,
+			},
+			BlockIndex: 1,
+		},
+	}, {
+		hex: hexFromFile("tx432083-2.hex"),
+		indexEntry: &indexers.TxIndexEntry{
+			BlockRegion: database.BlockRegion{
+				Hash: mustParseHash("00000000000000000bcc2bff8a7d978e1ed9b7763e17402cff3e" +
+					"58cb4a1d3aa3"),
+				Offset: 3405,
+				Len:    453,
+			},
+			BlockIndex: 2,
+		},
+	}}
+
+	// Create a testTx that exists in the mempool.
+	tx1TestTx := testTx{
+		hex: hexFromFile("tx432100-1.hex"),
+	}
+	tx1TestTx.vinList = []testTx{{
+		hex: hexFromFile("tx431843-1.hex"),
+		indexEntry: &indexers.TxIndexEntry{
+			BlockRegion: database.BlockRegion{
+				Hash: mustParseHash("0000000000000000107e144664020dc7f503de2f34c5a297e7bf" +
+					"b8ab7ce73ee1"),
+				Offset: 2226,
+				Len:    419,
+			},
+			BlockIndex: 1,
+		},
+	}, {
+		hex: hexFromFile("tx432098-11.hex"),
+		indexEntry: &indexers.TxIndexEntry{
+			BlockRegion: database.BlockRegion{
+				Hash: mustParseHash("00000000000000001fc4c4c7a3f2ec6d552dda16a3a928f27bd6" +
+					"bd16d8f1e9b3"),
+				Offset: 52508,
+				Len:    453,
+			},
+			BlockIndex: 11,
+		},
+	}}
+
+	// Define the test address and testTxs that involve that address.
+	address := "Dsi8CRt85xYyempXs7ZPL1rBxvDdAGZmgsg"
+	testTxs := []testTx{
+		tx0TestTx,
+		tx1TestTx,
+	}
+
+	// Mock AddrIndexer, TxIndexer, and DB methods based on the testTxs.
+	entriesForAddress := make([]indexers.TxIndexEntry, 0, len(testTxs))
+	unconfirmedTxnsForAddress := make([]*dcrutil.Tx, 0, len(testTxs))
+	txIndexEntryMap := make(map[chainhash.Hash]indexers.TxIndexEntry)
+	fetchBlockRegionMap := make(map[database.BlockRegion][]byte)
+	fetchBlockRegions := make([][]byte, 0, len(testTxs))
+	for _, testTx := range testTxs {
+		msgTx := hexToMsgTx(testTx.hex)
+		if testTx.indexEntry != nil {
+			entriesForAddress = append(entriesForAddress, *testTx.indexEntry)
+			fetchBlockRegions = append(fetchBlockRegions, hexToBytes(testTx.hex))
+		} else {
+			unconfirmedTxnsForAddress = append(unconfirmedTxnsForAddress,
+				dcrutil.NewTx(msgTx))
+		}
+		for _, vinTestTx := range testTx.vinList {
+			vinMtx := hexToMsgTx(vinTestTx.hex)
+			txIndexEntryMap[vinMtx.TxHash()] = *vinTestTx.indexEntry
+			blockRegion := vinTestTx.indexEntry.BlockRegion
+			fetchBlockRegionMap[blockRegion] = hexToBytes(vinTestTx.hex)
+		}
+	}
+	addrIndexer := defaultMockAddrIndexer()
+	addrIndexer.entriesForAddress = entriesForAddress
+	addrIndexer.unconfirmedTxnsForAddress = unconfirmedTxnsForAddress
+	txIndexer := defaultMockTxIndexer()
+	txIndexer.entry = func(hash *chainhash.Hash) (*indexers.TxIndexEntry, error) {
+		txIndexEntry := txIndexEntryMap[*hash]
+		return &txIndexEntry, nil
+	}
+	db := defaultMockDB()
+	db.viewTx = &testDatabaseTx{
+		fetchBlockRegion: func(region *database.BlockRegion) ([]byte, error) {
+			return fetchBlockRegionMap[*region], nil
+		},
+		fetchBlockRegions: func(regions []database.BlockRegion) ([][]byte, error) {
+			return fetchBlockRegions, nil
+		},
+	}
+
+	// Set result and filteredResult to the results that are expected.
+	result := make([]types.SearchRawTransactionsResult, len(testTxs))
+	filteredResult := make([]types.SearchRawTransactionsResult, len(testTxs))
+	vinExtra := true
+	filterAddr := map[string]struct{}{address: {}}
+	s := &Server{cfg: *defaultMockConfig(defaultChainParams)}
+	s.cfg.AddrIndexer = addrIndexer
+	s.cfg.DB = db
+	s.cfg.TxIndexer = txIndexer
+	for i, tx := range testTxs {
+		result[i] = searchRawTransactionsResult(t, s, tx, vinExtra, nil)
+		filteredResult[i] = searchRawTransactionsResult(t, s, tx, vinExtra,
+			filterAddr)
+	}
+
+	testRPCServerHandler(t, []rpcTest{{
+		name:    "handleSearchRawTransactions: ok",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(0),
+		},
+		mockAddrIndexer: addrIndexer,
+		mockDB:          db,
+		result: []string{
+			tx0TestTx.hex,
+			tx1TestTx.hex,
+		},
+	}, {
+		name:    "handleSearchRawTransactions: ok verbose",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(1),
+		},
+		mockAddrIndexer: addrIndexer,
+		mockDB:          db,
+		mockTxIndexer:   txIndexer,
+		result:          result,
+	}, {
+		name:    "handleSearchRawTransactions: ok verbose with addr filter",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(1),
+			FilterAddrs: &[]string{
+				address,
+			},
+		},
+		mockAddrIndexer: addrIndexer,
+		mockDB:          db,
+		mockTxIndexer:   txIndexer,
+		result:          filteredResult,
+	}, {
+		name:    "handleSearchRawTransactions: ok with count < 0",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(0),
+			Count:    dcrjson.Int(-1),
+		},
+		mockAddrIndexer: addrIndexer,
+		mockDB:          db,
+		result: []string{
+			tx0TestTx.hex,
+		},
+	}, {
+		name:    "handleSearchRawTransactions: ok with skip < 0",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(0),
+			Skip:     dcrjson.Int(-1),
+		},
+		mockAddrIndexer: addrIndexer,
+		mockDB:          db,
+		result: []string{
+			tx0TestTx.hex,
+			tx1TestTx.hex,
+		},
+	}, {
+		name:    "handleSearchRawTransactions: ok with skip > available mempool txns",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(0),
+			Skip:     dcrjson.Int(2),
+		},
+		mockAddrIndexer: addrIndexer,
+		mockDB:          db,
+		result: []string{
+			tx0TestTx.hex,
+		},
+	}, {
+		name:    "handleSearchRawTransactions: ok reversed",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(0),
+			Reverse:  dcrjson.Bool(true),
+		},
+		mockAddrIndexer: addrIndexer,
+		mockDB:          db,
+		result: []string{
+			tx1TestTx.hex,
+			tx0TestTx.hex,
+		},
+	}, {
+		name:    "handleSearchRawTransactions: address index not enabled",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+		},
+		setAddrIndexerNil: true,
+		wantErr:           true,
+		errCode:           dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleSearchRawTransactions: transaction index not enabled",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+		},
+		setTxIndexerNil: true,
+		wantErr:         true,
+		errCode:         dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleSearchRawTransactions: invalid address",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  "invalid",
+			VinExtra: dcrjson.Int(1),
+		},
+		wantErr: true,
+		errCode: dcrjson.ErrRPCInvalidAddressOrKey,
+	}, {
+		name:    "handleSearchRawTransactions: count == 0",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Count:    dcrjson.Int(0),
+		},
+		result: nil,
+	}, {
+		name:    "handleSearchRawTransactions: entries for address err",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+		},
+		mockAddrIndexer: func() *testAddrIndexer {
+			addrIndexer := defaultMockAddrIndexer()
+			addrIndexer.entriesForAddressErr = errors.New("entries for address err")
+			return addrIndexer
+		}(),
+		wantErr: true,
+		errCode: dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleSearchRawTransactions: fetch block regions err",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+		},
+		mockDB: func() *testDB {
+			db := defaultMockDB()
+			db.viewTx = &testDatabaseTx{
+				fetchBlockRegions: func(regions []database.BlockRegion) ([][]byte, error) {
+					return nil, errors.New("fetch block regions err")
+				},
+			}
+			return db
+		}(),
+		wantErr: true,
+		errCode: dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleSearchRawTransactions: no txns available",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+		},
+		mockDB: func() *testDB {
+			db := defaultMockDB()
+			db.viewTx = &testDatabaseTx{
+				fetchBlockRegions: func(regions []database.BlockRegion) ([][]byte, error) {
+					return [][]byte{}, nil
+				},
+			}
+			return db
+		}(),
+		wantErr: true,
+		errCode: dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleSearchRawTransactions: failed to deserialize transaction",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(1),
+		},
+		mockAddrIndexer: addrIndexer,
+		mockDB: func() *testDB {
+			db := defaultMockDB()
+			db.viewTx = &testDatabaseTx{
+				fetchBlockRegions: func(regions []database.BlockRegion) ([][]byte, error) {
+					return [][]byte{hexToBytes("bad1")}, nil
+				},
+			}
+			return db
+		}(),
+		mockTxIndexer: txIndexer,
+		wantErr:       true,
+		errCode:       dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleSearchRawTransactions: block not found",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(1),
+		},
+		mockAddrIndexer: addrIndexer,
+		mockDB:          db,
+		mockTxIndexer:   txIndexer,
+		mockChain: func() *testRPCChain {
+			chain := defaultMockRPCChain()
+			chain.headerByHashErr = errors.New("block not found")
+			return chain
+		}(),
+		wantErr: true,
+		errCode: dcrjson.ErrRPCBlockNotFound,
+	}, {
+		name:    "handleSearchRawTransactions: failed to obtain block height",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(1),
+		},
+		mockAddrIndexer: addrIndexer,
+		mockDB:          db,
+		mockTxIndexer:   txIndexer,
+		mockChain: func() *testRPCChain {
+			chain := defaultMockRPCChain()
+			chain.blockHeightByHashErr = errors.New("failed to obtain block height")
+			return chain
+		}(),
+		wantErr: true,
+		errCode: dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleSearchRawTransactions: failed to retrieve tx location",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(1),
+		},
+		mockAddrIndexer: addrIndexer,
+		mockDB:          db,
+		mockTxIndexer: func() *testTxIndexer {
+			txIndexer := defaultMockTxIndexer()
+			txIndexer.entry = func(hash *chainhash.Hash) (*indexers.TxIndexEntry, error) {
+				return nil, errors.New("failed to retrieve tx location")
+			}
+			return txIndexer
+		}(),
+		wantErr: true,
+		errCode: dcrjson.ErrRPCInternal.Code,
+	}})
+}
+
 func TestHandleSubmitBlock(t *testing.T) {
 	t.Parallel()
 
@@ -4986,6 +5739,21 @@ func testRPCServerHandler(t *testing.T, tests []rpcTest) {
 			if test.setExistsAddresserNil {
 				rpcserverConfig.ExistsAddresser = nil
 			}
+			if test.mockAddrIndexer != nil {
+				rpcserverConfig.AddrIndexer = test.mockAddrIndexer
+			}
+			if test.setAddrIndexerNil {
+				rpcserverConfig.AddrIndexer = nil
+			}
+			if test.mockTxIndexer != nil {
+				rpcserverConfig.TxIndexer = test.mockTxIndexer
+			}
+			if test.setTxIndexerNil {
+				rpcserverConfig.TxIndexer = nil
+			}
+			if test.mockDB != nil {
+				rpcserverConfig.DB = test.mockDB
+			}
 			if test.mockConnManager != nil {
 				rpcserverConfig.ConnMgr = test.mockConnManager
 			}
@@ -5017,6 +5785,9 @@ func testRPCServerHandler(t *testing.T, tests []rpcTest) {
 				if ms.workState != nil {
 					workState = ms.workState
 				}
+			}
+			if test.mockMiningAddrs != nil {
+				rpcserverConfig.MiningAddrs = test.mockMiningAddrs
 			}
 			if test.mockBlockTemplater != nil {
 				rpcserverConfig.BlockTemplater = test.mockBlockTemplater

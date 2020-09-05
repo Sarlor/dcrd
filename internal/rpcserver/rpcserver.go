@@ -35,7 +35,6 @@ import (
 	"github.com/decred/dcrd/blockchain/stake/v3"
 	"github.com/decred/dcrd/blockchain/standalone/v2"
 	"github.com/decred/dcrd/blockchain/v3"
-	"github.com/decred/dcrd/blockchain/v3/indexers"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/chaincfg/v3"
 	"github.com/decred/dcrd/database/v2"
@@ -1669,7 +1668,7 @@ func handleGenerate(ctx context.Context, s *Server, cmd interface{}) (interface{
 		return nil, &dcrjson.RPCError{
 			Code: dcrjson.ErrRPCDifficulty,
 			Message: fmt.Sprintf("No support for `generate` on the current "+
-				"network, %s, as it's unlikely to be possible to main a block "+
+				"network, %s, as it's unlikely to be possible to mine a block "+
 				"with the CPU.", params.Net),
 		}
 	}
@@ -2398,8 +2397,8 @@ func handleGetInfo(_ context.Context, s *Server, cmd interface{}) (interface{}, 
 		Difficulty:      getDifficultyRatio(best.Bits, s.cfg.ChainParams),
 		TestNet:         s.cfg.TestNet,
 		RelayFee:        s.cfg.MinRelayTxFee.ToCoin(),
-		AddrIndex:       s.cfg.AddrIndex != nil,
-		TxIndex:         s.cfg.TxIndex != nil,
+		AddrIndex:       s.cfg.AddrIndexer != nil,
+		TxIndex:         s.cfg.TxIndexer != nil,
 	}
 
 	return ret, nil
@@ -2737,15 +2736,14 @@ func handleGetRawTransaction(_ context.Context, s *Server, cmd interface{}) (int
 	var blkIndex uint32
 	tx, err := s.cfg.TxMempooler.FetchTransaction(txHash)
 	if err != nil {
-		txIndex := s.cfg.TxIndex
-		if txIndex == nil {
+		if s.cfg.TxIndexer == nil {
 			return nil, rpcInternalError("The transaction index "+
 				"must be enabled to query the blockchain "+
 				"(specify --txindex)", "Configuration")
 		}
 
 		// Look up the location of the transaction.
-		idxEntry, err := txIndex.Entry(txHash)
+		idxEntry, err := s.cfg.TxIndexer.Entry(txHash)
 		if err != nil {
 			context := "Failed to retrieve transaction location"
 			return nil, rpcInternalError(err.Error(), context)
@@ -3682,7 +3680,7 @@ func fetchInputTxos(s *Server, tx *wire.MsgTx) (map[wire.OutPoint]wire.TxOut, er
 		}
 
 		// Look up the location of the transaction.
-		idxEntry, err := s.cfg.TxIndex.Entry(&origin.Hash)
+		idxEntry, err := s.cfg.TxIndexer.Entry(&origin.Hash)
 		if err != nil {
 			context := "Failed to retrieve transaction location"
 			return nil, rpcInternalError(err.Error(), context)
@@ -3870,7 +3868,7 @@ func createVinListPrevOut(s *Server, mtx *wire.MsgTx, chainParams *chaincfg.Para
 func fetchMempoolTxnsForAddress(s *Server, addr dcrutil.Address, numToSkip, numRequested uint32) ([]*dcrutil.Tx, uint32) {
 	// There are no entries to return when there are less available than
 	// the number being skipped.
-	mpTxns := s.cfg.AddrIndex.UnconfirmedTxnsForAddress(addr)
+	mpTxns := s.cfg.AddrIndexer.UnconfirmedTxnsForAddress(addr)
 	numAvailable := uint32(len(mpTxns))
 	if numToSkip > numAvailable {
 		return nil, numAvailable
@@ -3888,8 +3886,7 @@ func fetchMempoolTxnsForAddress(s *Server, addr dcrutil.Address, numToSkip, numR
 // handleSearchRawTransactions implements the searchrawtransactions command.
 func handleSearchRawTransactions(_ context.Context, s *Server, cmd interface{}) (interface{}, error) {
 	// Respond with an error if the address index is not enabled.
-	addrIndex := s.cfg.AddrIndex
-	if addrIndex == nil {
+	if s.cfg.AddrIndexer == nil {
 		return nil, rpcInternalError("Address index must be "+
 			"enabled (--addrindex)", "Configuration")
 	}
@@ -3906,7 +3903,7 @@ func handleSearchRawTransactions(_ context.Context, s *Server, cmd interface{}) 
 	// transaction index.  Currently the address index relies on the
 	// transaction index, so this check is redundant, but it's better to be
 	// safe in case the address index is ever changed to not rely on it.
-	if vinExtra && s.cfg.TxIndex == nil {
+	if vinExtra && s.cfg.TxIndexer == nil {
 		return nil, rpcInternalError("Transaction index must be "+
 			"enabled (--txindex)", "Configuration")
 	}
@@ -3973,7 +3970,7 @@ func handleSearchRawTransactions(_ context.Context, s *Server, cmd interface{}) 
 	// are needed.
 	if len(addressTxns) < numRequested {
 		err = s.cfg.DB.View(func(dbTx database.Tx) error {
-			idxEntries, dbSkipped, err := addrIndex.EntriesForAddress(
+			idxEntries, dbSkipped, err := s.cfg.AddrIndexer.EntriesForAddress(
 				dbTx, addr, uint32(numToSkip)-numSkipped,
 				uint32(numRequested-len(addressTxns)), reverse)
 			if err != nil {
@@ -5641,10 +5638,12 @@ type Config struct {
 	BlockTemplater BlockTemplater
 	CPUMiner       CPUMiner
 
-	// These fields define any optional indexes the RPC server can make use
-	// of to provide additional data when queried.
-	TxIndex   *indexers.TxIndex
-	AddrIndex *indexers.AddrIndex
+	// TxIndexer defines the optional transaction indexer for the RPC server to
+	// use.
+	TxIndexer TxIndexer
+
+	// AddrIndexer defines the optional address indexer for the RPC server to use.
+	AddrIndexer AddrIndexer
 
 	// NetInfo defines a slice of the available networks.
 	NetInfo []types.NetworksResult
